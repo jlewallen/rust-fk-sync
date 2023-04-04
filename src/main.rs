@@ -3,19 +3,48 @@ extern crate lazy_static;
 extern crate hex;
 extern crate socket2;
 
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Barrier};
-use std::thread::JoinHandle;
-use std::time::Duration;
-use std::{thread, time};
-
 use socket2::{Domain, Protocol, Socket, Type};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use tokio::time::{sleep, Duration};
+use tokio::{net::UdpSocket, sync::mpsc};
 
 use anyhow::Result;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
+    let sock = UdpSocket::bind("0.0.0.0:22144".parse::<SocketAddr>().unwrap()).await?;
+    let r = Arc::new(sock);
+    let s = r.clone();
+    let (tx, mut rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(1_000);
+
+    tokio::spawn(async move {
+        loop {
+            let len = s
+                .send_to(&[0, 1, 2], "192.168.0.205:22134")
+                .await
+                .expect("send_to failed");
+
+            println!("{:?} bytes sent", len);
+
+            sleep(Duration::from_secs(5)).await;
+        }
+        /*
+        while let Some((bytes, addr)) = rx.recv().await {
+            let len = s.send_to(&bytes, &addr).await.unwrap();
+            println!("{:?} bytes sent", len);
+        }
+        */
+    });
+
+    let mut buf = [0; 128];
+    loop {
+        let (len, addr) = r.recv_from(&mut buf).await?;
+        println!("{:?} bytes received from {:?}", len, addr);
+        tx.send((buf[..len].to_vec(), addr)).await.unwrap();
+    }
+    /*
     if true {
         let socket = UdpSocket::bind("192.168.0.100:22144")?;
 
@@ -29,18 +58,13 @@ fn main() -> Result<()> {
         let buf = &mut buf[..amt];
         buf.reverse();
         */
-        println!("connecting...");
 
-        socket.connect("192.168.0.205:22144")?;
-
-        println!("sending...");
-
-        for _ in 0..10 {
+        for _ in 0..1000 {
             println!("send!");
 
-            socket.send(&[0, 1, 2])?;
+            socket.send_to(&[0, 1, 2], "192.168.0.205:22134")?;
 
-            let sleeping = time::Duration::from_secs(1);
+            let sleeping = time::Duration::from_secs(5);
             thread::sleep(sleeping);
         }
     } else {
@@ -52,10 +76,12 @@ fn main() -> Result<()> {
         let sleeping = time::Duration::from_secs(60);
         thread::sleep(sleeping);
     }
+    */
+
     Ok(())
 }
 
-pub const PORT: u16 = 22143;
+pub const PORT: u16 = 22134;
 
 lazy_static! {
     pub static ref IPV4: IpAddr = Ipv4Addr::new(224, 0, 0, 123).into();
@@ -75,6 +101,7 @@ fn new_socket(addr: &SocketAddr) -> io::Result<Socket> {
     Ok(socket)
 }
 
+/*
 #[cfg(unix)]
 fn bind_multicast(socket: &Socket, addr: &SocketAddr) -> io::Result<()> {
     socket.bind(&socket2::SockAddr::from(*addr))
@@ -98,11 +125,13 @@ fn join_multicast(addr: SocketAddr) -> io::Result<UdpSocket> {
 
     Ok(socket.into())
 }
+*/
 
 //        4b6af989-53334648-50202020-ff12410c
 
 // 120a10-4b6af989-53334648-50202020-ff12410c
 
+/*
 fn multicast_listener(
     response: &'static str,
     client_done: Arc<AtomicBool>,
@@ -148,3 +177,4 @@ fn multicast_listener(
 
     join_handle
 }
+*/
