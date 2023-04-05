@@ -1,34 +1,164 @@
 use anyhow::Result;
-use std::net::{Ipv4Addr, SocketAddrV4};
-use std::sync::Arc;
-use tokio::{
-    net::UdpSocket,
-    time::{sleep, Duration},
+use std::{
+    collections::HashMap,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    sync::Arc,
 };
-use tokio::{signal, task};
-
-use tracing::info;
+use tokio::{
+    net::{ToSocketAddrs, UdpSocket},
+    signal,
+    sync::mpsc,
+    sync::mpsc::Sender,
+    sync::Mutex,
+    // task,
+    // time::{sleep, Duration},
+};
+use tracing::*;
 use tracing_subscriber::prelude::*;
 
-struct Server {}
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct DeviceId(String);
+
+#[derive(Clone, Debug)]
+pub struct Discovered {
+    device_id: DeviceId,
+    addr: SocketAddr,
+}
+
+fn get_device_id(bytes: &[u8]) -> Result<DeviceId> {
+    use quick_protobuf::BytesReader;
+
+    let mut reader = BytesReader::from_bytes(bytes);
+    let size = reader.read_varint32(bytes)?;
+    match size {
+        18 => {
+            let tag = reader.next_tag(bytes)?;
+            assert_eq!(tag >> 3, 1);
+
+            let id_bytes = reader.read_bytes(bytes)?;
+            assert_eq!(id_bytes.len(), 16);
+
+            Ok(DeviceId(hex::encode(id_bytes)))
+        }
+        _ => todo!(),
+    }
+}
+
+enum DeviceState {
+    Querying,
+}
+
+struct ConnectedDevice {
+    discovered: Discovered,
+    state: DeviceState,
+}
+
+#[derive(Debug)]
+enum ServerCommand {
+    StartSyncing(Discovered),
+    Reply(Message),
+}
+
+struct Server {
+    port: u16,
+    sender: Arc<Mutex<Option<Sender<ServerCommand>>>>,
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self {
+            port: 22144,
+            sender: Arc::new(Mutex::new(None)),
+        }
+    }
+}
 
 impl Server {
-    async fn run(&self) -> Result<()> {
+    pub async fn run(&self) -> Result<()> {
         const IP_ALL: [u8; 4] = [0, 0, 0, 0];
-        let addr = SocketAddrV4::new(IP_ALL.into(), 22144);
+        let addr = SocketAddrV4::new(IP_ALL.into(), self.port);
         let receiving = Arc::new(self.bind(&addr)?);
         let sending = receiving.clone();
 
         info!("listening on {}", addr);
 
+        let mut devices = HashMap::<DeviceId, ConnectedDevice>::default();
+        let (tx, mut rx) = mpsc::channel::<ServerCommand>(32);
+
+        let pump = tokio::spawn({
+            let mut locked = self.sender.lock().await;
+            *locked = Some(tx.clone());
+            async move {
+                while let Some(c) = rx.recv().await {
+                    match &c {
+                        ServerCommand::StartSyncing(discovered) => {
+                            let key = &discovered.device_id;
+                            if !devices.contains_key(key) {
+                                info!("{:?}", c);
+
+                                devices.insert(
+                                    key.clone(),
+                                    ConnectedDevice {
+                                        discovered: discovered.clone(),
+                                        state: DeviceState::Querying,
+                                    },
+                                );
+                            }
+                            // TODO Eventually move this up.
+                            let reply = Message::Query;
+
+                            transmit(&sending, &discovered.addr, &reply)
+                                .await
+                                .expect("send failed");
+                        }
+                        ServerCommand::Reply(reply) => {
+                            info!("reply {:?}", reply)
+                        }
+                    }
+                }
+            }
+        });
+
+        let receive = tokio::spawn({
+            async move {
+                let mut buffer = vec![0u8; 4096];
+
+                loop {
+                    let (len, addr) = receiving
+                        .recv_from(&mut buffer[..])
+                        .await
+                        .expect("recv failed");
+
+                    info!("{} received bytes from {}", len, addr);
+
+                    let message = Message::read(&buffer).expect("parse failed");
+
+                    tx.send(ServerCommand::Reply(message))
+                        .await
+                        .expect("send self failed");
+                }
+            }
+        });
+
         tokio::select! {
-            res = task::spawn(async move { transmit(sending, "192.168.0.205:22144").await }) => {
-                return res.map_err(|e| e.into()).and_then(|e| e)
+            _ = pump => {
+                println!("server pump done");
+                Ok(())
             },
-            res = task::spawn(async move { receive(receiving).await }) => {
-                return res.map_err(|e| e.into()).and_then(|e| e)
+            _ = receive => {
+                println!("receive pump done");
+                Ok(())
             },
         }
+    }
+
+    pub async fn sync(&self, discovered: Discovered) -> Result<()> {
+        self.send(ServerCommand::StartSyncing(discovered)).await
+    }
+
+    async fn send(&self, cmd: ServerCommand) -> Result<()> {
+        let locked = self.sender.lock().await;
+        Ok(locked.as_ref().expect("sender required").send(cmd).await?)
     }
 
     fn bind(&self, addr: &SocketAddrV4) -> Result<UdpSocket> {
@@ -44,64 +174,70 @@ impl Server {
     }
 }
 
-async fn receive(rx: Arc<UdpSocket>) -> Result<()> {
-    let mut buffer = vec![0u8; 4096];
+async fn transmit<A>(tx: &Arc<UdpSocket>, addr: &A, m: &Message) -> Result<()>
+where
+    A: ToSocketAddrs + std::fmt::Debug,
+{
+    let mut buffer = Vec::new();
+    m.write(&mut buffer)?;
 
-    loop {
-        let (len, addr) = rx.recv_from(&mut buffer[..]).await?;
-        info!("{} received bytes from {}", len, addr);
-    }
+    let len = tx.send_to(&buffer, addr).await?;
+    info!("{:?} bytes sent to {:?}", len, addr);
+
+    Ok(())
 }
 
-async fn transmit(tx: Arc<UdpSocket>, addr: &str) -> Result<()> {
-    loop {
-        let len = tx.send_to(&[0, 1, 2], addr).await?;
-        info!("{:?} bytes sent", len);
-
-        sleep(Duration::from_secs(5)).await;
-    }
-}
-
+#[derive(Default)]
 struct Discovery {}
 
 impl Discovery {
-    async fn run(&self) -> Result<()> {
+    pub async fn run(&self, publisher: Sender<Discovered>) -> Result<()> {
         let addr = SocketAddrV4::new(Ipv4Addr::new(224, 1, 2, 3), 22143);
         let receiving = Arc::new(self.bind(&addr)?);
 
         info!("discovering on {}", addr);
 
-        tokio::select! {
-            res = task::spawn(async move { receive_discoveries(receiving).await }) => {
-                return res.map_err(|e| e.into()).and_then(|e| e)
-            },
+        let mut buffer = vec![0u8; 4096];
+
+        loop {
+            let (len, addr) = receiving.recv_from(&mut buffer[..]).await?;
+            debug!("{} bytes from {}", len, addr);
+
+            let bytes = &buffer[0..len];
+            let device_id = get_device_id(bytes)?;
+            let discovered = Discovered {
+                device_id,
+                addr: {
+                    let mut addr = addr;
+                    addr.set_port(22144);
+                    addr
+                },
+            };
+
+            debug!("discovered {:?}", discovered);
+
+            publisher.send(discovered).await?;
         }
     }
 
     fn bind(&self, addr: &SocketAddrV4) -> Result<UdpSocket> {
         use socket2::{Domain, Protocol, Socket, Type};
 
-        assert!(addr.ip().is_multicast(), "Must be multcast address");
+        assert!(addr.ip().is_multicast(), "must be multcast address");
 
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
-        socket.set_reuse_address(true)?;
-        socket.set_multicast_loop_v4(true)?;
-        socket.set_nonblocking(true)?;
+        // Unnecessary for our use case, though good to know it's around.
+        // socket.set_reuse_address(true)?;
+        // socket.set_multicast_loop_v4(true)?;
 
+        // This is very important when using UdpSocket::from_std, otherwise
+        // you'll see weird blocking behavior.
+        socket.set_nonblocking(true)?;
         socket.bind(&socket2::SockAddr::from(*addr))?;
         socket.join_multicast_v4(addr.ip(), &Ipv4Addr::new(0, 0, 0, 0))?;
 
         Ok(UdpSocket::from_std(socket.into())?)
-    }
-}
-
-async fn receive_discoveries(rx: Arc<UdpSocket>) -> Result<()> {
-    let mut buffer = vec![0u8; 4096];
-
-    loop {
-        let (len, addr) = rx.recv_from(&mut buffer[..]).await?;
-        info!("{} received bytes from {}", len, addr);
     }
 }
 
@@ -116,18 +252,96 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let server = Server {};
-    let discovery = Discovery {};
+    let server = Arc::new(Server::default());
+    let discovery = Discovery::default();
+    let (tx, mut rx) = mpsc::channel::<Discovered>(32);
+
+    let pump = tokio::spawn({
+        let server = server.clone();
+        async move {
+            while let Some(d) = rx.recv().await {
+                info!("{:?}", d);
+                server.sync(d).await.expect("error initiating sync");
+            }
+        }
+    });
 
     Ok(tokio::select! {
-        _ = discovery.run() => {
+        _ = discovery.run(tx) => {
             println!("discovery done")
         },
         _ = server.run() => {
             println!("server done")
         },
+        _ = pump => {
+            println!("pump done")
+        },
         res = signal::ctrl_c() => {
             return res.map_err(|e| e.into())
         },
     })
+}
+
+#[derive(Debug)]
+enum Message {
+    Query,
+    Statistics { tail: u64 },
+    Require { first: u64, tail: u64 },
+    Records { first: u64 },
+}
+
+impl Message {
+    fn read(bytes: &[u8]) -> Result<Self> {
+        use quick_protobuf::reader::BytesReader;
+
+        let mut reader = BytesReader::from_bytes(bytes);
+        let kind = reader.read_fixed32(bytes)?;
+
+        match kind {
+            0 => Ok(Self::Query {}),
+            1 => {
+                let tail = reader.read_fixed32(bytes)? as u64;
+                Ok(Self::Statistics { tail })
+            }
+            2 => {
+                let first = reader.read_fixed32(bytes)? as u64;
+                let tail = reader.read_fixed32(bytes)? as u64;
+                Ok(Self::Require { first, tail })
+            }
+            3 => {
+                let first = reader.read_fixed32(bytes)? as u64;
+                Ok(Self::Records { first })
+            }
+            _ => todo!(),
+        }
+    }
+
+    fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        use quick_protobuf::writer::Writer;
+
+        let mut writer = Writer::new(bytes);
+
+        match self {
+            Message::Query => {
+                writer.write_uint32(0)?;
+                Ok(())
+            }
+            Message::Statistics { tail } => {
+                writer.write_uint32(1)?;
+                writer.write_uint32(*tail as u32)?;
+                Ok(())
+            }
+            Message::Require { first, tail } => {
+                writer.write_uint32(2)?;
+                writer.write_uint32(*first as u32)?;
+                writer.write_uint32(*tail as u32)?;
+                Ok(())
+            }
+            Message::Records { first } => {
+                writer.write_uint32(3)?;
+                writer.write_uint32(*first as u32)?;
+                Ok(())
+            }
+        }
+    }
 }
