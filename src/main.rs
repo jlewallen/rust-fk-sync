@@ -7,6 +7,9 @@ use tokio::{
 };
 use tokio::{signal, task};
 
+use tracing::info;
+use tracing_subscriber::prelude::*;
+
 struct Server {}
 
 impl Server {
@@ -15,6 +18,8 @@ impl Server {
         let addr = SocketAddrV4::new(IP_ALL.into(), 22144);
         let receiving = Arc::new(self.bind(&addr)?);
         let sending = receiving.clone();
+
+        info!("listening on {}", addr);
 
         tokio::select! {
             res = task::spawn(async move { transmit(sending, "192.168.0.205:22144").await }) => {
@@ -44,14 +49,14 @@ async fn receive(rx: Arc<UdpSocket>) -> Result<()> {
 
     loop {
         let (len, addr) = rx.recv_from(&mut buffer[..]).await?;
-        println!("{} received bytes from {}", len, addr);
+        info!("{} received bytes from {}", len, addr);
     }
 }
 
 async fn transmit(tx: Arc<UdpSocket>, addr: &str) -> Result<()> {
     loop {
         let len = tx.send_to(&[0, 1, 2], addr).await?;
-        println!("{:?} bytes sent", len);
+        info!("{:?} bytes sent", len);
 
         sleep(Duration::from_secs(5)).await;
     }
@@ -62,10 +67,9 @@ struct Discovery {}
 impl Discovery {
     async fn run(&self) -> Result<()> {
         let addr = SocketAddrV4::new(Ipv4Addr::new(224, 1, 2, 3), 22143);
-
-        println!("discovering on {}", addr);
-
         let receiving = Arc::new(self.bind(&addr)?);
+
+        info!("discovering on {}", addr);
 
         tokio::select! {
             res = task::spawn(async move { receive_discoveries(receiving).await }) => {
@@ -97,12 +101,21 @@ async fn receive_discoveries(rx: Arc<UdpSocket>) -> Result<()> {
 
     loop {
         let (len, addr) = rx.recv_from(&mut buffer[..]).await?;
-        println!("{} received bytes from {}", len, addr);
+        info!("{} received bytes from {}", len, addr);
     }
+}
+
+fn get_rust_log() -> String {
+    std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(get_rust_log()))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
     let server = Server {};
     let discovery = Discovery {};
 
