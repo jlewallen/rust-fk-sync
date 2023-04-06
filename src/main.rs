@@ -10,6 +10,7 @@ use tokio::{
     sync::mpsc,
     sync::mpsc::Sender,
     sync::Mutex,
+    time::Instant,
     // task,
     // time::{sleep, Duration},
 };
@@ -45,18 +46,41 @@ fn get_device_id(bytes: &[u8]) -> Result<DeviceId> {
 }
 
 enum DeviceState {
+    JustDiscovered,
     Querying,
 }
 
+#[allow(dead_code)]
 struct ConnectedDevice {
     discovered: Discovered,
     state: DeviceState,
+    activity: Instant,
+}
+
+impl ConnectedDevice {
+    fn should_query(&mut self) -> bool {
+        match self.state {
+            DeviceState::JustDiscovered => {
+                self.state = DeviceState::Querying;
+                self.activity = Instant::now();
+                true
+            }
+            DeviceState::Querying => {
+                if Instant::now() - self.activity > std::time::Duration::from_secs(30) {
+                    self.activity = Instant::now();
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 enum ServerCommand {
     StartSyncing(Discovered),
-    Reply(Message),
+    Reply(SocketAddr, Message),
 }
 
 struct Server {
@@ -89,30 +113,47 @@ impl Server {
             let mut locked = self.sender.lock().await;
             *locked = Some(tx.clone());
             async move {
-                while let Some(c) = rx.recv().await {
-                    match &c {
+                while let Some(cmd) = rx.recv().await {
+                    match &cmd {
                         ServerCommand::StartSyncing(discovered) => {
-                            let key = &discovered.device_id;
-                            if !devices.contains_key(key) {
-                                info!("{:?}", c);
+                            info!("{:?}", cmd);
 
-                                devices.insert(
-                                    key.clone(),
-                                    ConnectedDevice {
-                                        discovered: discovered.clone(),
-                                        state: DeviceState::Querying,
-                                    },
-                                );
+                            let entry = devices.entry(discovered.device_id.clone());
+                            let entry = entry.or_insert_with(|| ConnectedDevice {
+                                discovered: discovered.clone(),
+                                state: DeviceState::JustDiscovered,
+                                activity: Instant::now(),
+                            });
+
+                            if entry.should_query() {
+                                transmit(&sending, &discovered.addr, &Message::Query)
+                                    .await
+                                    .expect("send failed");
                             }
-                            // TODO Eventually move this up.
-                            let reply = Message::Query;
-
-                            transmit(&sending, &discovered.addr, &reply)
-                                .await
-                                .expect("send failed");
                         }
-                        ServerCommand::Reply(reply) => {
-                            info!("reply {:?}", reply)
+                        ServerCommand::Reply(addr, reply) => {
+                            info!("reply {:?}", reply);
+
+                            match reply {
+                                Message::Query => todo!(),
+                                Message::Statistics { tail } => {
+                                    info!("requiring {}", tail);
+
+                                    let reply = Message::Require {
+                                        first: 0,
+                                        // tail: *tail,
+                                        tail: 100,
+                                    };
+
+                                    transmit(&sending, &addr, &reply)
+                                        .await
+                                        .expect("send failed");
+                                }
+                                #[allow(unused_variables)]
+                                Message::Require { first, tail } => todo!(),
+                                #[allow(unused_variables)]
+                                Message::Records { first } => {}
+                            }
                         }
                     }
                 }
@@ -129,11 +170,11 @@ impl Server {
                         .await
                         .expect("recv failed");
 
-                    info!("{} received bytes from {}", len, addr);
+                    info!("{} bytes from {}", len, addr);
 
                     let message = Message::read(&buffer).expect("parse failed");
 
-                    tx.send(ServerCommand::Reply(message))
+                    tx.send(ServerCommand::Reply(addr, message))
                         .await
                         .expect("send self failed");
                 }
@@ -182,7 +223,7 @@ where
     m.write(&mut buffer)?;
 
     let len = tx.send_to(&buffer, addr).await?;
-    info!("{:?} bytes sent to {:?}", len, addr);
+    info!("{:?} bytes to {:?}", len, addr);
 
     Ok(())
 }
@@ -323,23 +364,23 @@ impl Message {
 
         match self {
             Message::Query => {
-                writer.write_uint32(0)?;
+                writer.write_fixed32(0)?;
                 Ok(())
             }
             Message::Statistics { tail } => {
-                writer.write_uint32(1)?;
-                writer.write_uint32(*tail as u32)?;
+                writer.write_fixed32(1)?;
+                writer.write_fixed32(*tail as u32)?;
                 Ok(())
             }
             Message::Require { first, tail } => {
-                writer.write_uint32(2)?;
-                writer.write_uint32(*first as u32)?;
-                writer.write_uint32(*tail as u32)?;
+                writer.write_fixed32(2)?;
+                writer.write_fixed32(*first as u32)?;
+                writer.write_fixed32(*tail as u32)?;
                 Ok(())
             }
             Message::Records { first } => {
-                writer.write_uint32(3)?;
-                writer.write_uint32(*first as u32)?;
+                writer.write_fixed32(3)?;
+                writer.write_fixed32(*first as u32)?;
                 Ok(())
             }
         }
