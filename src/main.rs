@@ -132,7 +132,7 @@ impl Server {
                             }
                         }
                         ServerCommand::Reply(addr, reply) => {
-                            info!("reply {:?}", reply);
+                            info!("{:?}", reply);
 
                             match reply {
                                 Message::Query => todo!(),
@@ -152,7 +152,7 @@ impl Server {
                                 #[allow(unused_variables)]
                                 Message::Require { first, tail } => todo!(),
                                 #[allow(unused_variables)]
-                                Message::Records { first } => {}
+                                Message::Records { first, records } => {}
                             }
                         }
                     }
@@ -172,7 +172,7 @@ impl Server {
 
                     info!("{} bytes from {}", len, addr);
 
-                    let message = Message::read(&buffer).expect("parse failed");
+                    let message = Message::read(&buffer[0..len]).expect("parse failed");
 
                     tx.send(ServerCommand::Reply(addr, message))
                         .await
@@ -323,12 +323,20 @@ async fn main() -> Result<()> {
     })
 }
 
+struct RawRecord(Vec<u8>);
+
+impl std::fmt::Debug for RawRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RawRecord").field(&self.0.len()).finish()
+    }
+}
+
 #[derive(Debug)]
 enum Message {
     Query,
     Statistics { tail: u64 },
     Require { first: u64, tail: u64 },
-    Records { first: u64 },
+    Records { first: u64, records: Vec<RawRecord> },
 }
 
 impl Message {
@@ -351,7 +359,14 @@ impl Message {
             }
             3 => {
                 let first = reader.read_fixed32(bytes)? as u64;
-                Ok(Self::Records { first })
+
+                let mut records: Vec<RawRecord> = Vec::new();
+                while !reader.is_eof() {
+                    let record = reader.read_bytes(bytes)?;
+                    records.push(RawRecord(record.into()));
+                }
+
+                Ok(Self::Records { first, records })
             }
             _ => todo!(),
         }
@@ -378,9 +393,12 @@ impl Message {
                 writer.write_fixed32(*tail as u32)?;
                 Ok(())
             }
-            Message::Records { first } => {
+            Message::Records { first, records } => {
                 writer.write_fixed32(3)?;
                 writer.write_fixed32(*first as u32)?;
+
+                assert!(records.len() == 0); // Laziness
+
                 Ok(())
             }
         }
