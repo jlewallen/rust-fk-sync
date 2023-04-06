@@ -170,7 +170,7 @@ impl Server {
                         .await
                         .expect("recv failed");
 
-                    info!("{} bytes from {}", len, addr);
+                    debug!("{} bytes from {}", len, addr);
 
                     let message = Message::read(&buffer[0..len]).expect("parse failed");
 
@@ -219,11 +219,13 @@ async fn transmit<A>(tx: &Arc<UdpSocket>, addr: &A, m: &Message) -> Result<()>
 where
     A: ToSocketAddrs + std::fmt::Debug,
 {
+    info!("{:?} to {:?}", m, addr);
+
     let mut buffer = Vec::new();
     m.write(&mut buffer)?;
 
     let len = tx.send_to(&buffer, addr).await?;
-    info!("{:?} bytes to {:?}", len, addr);
+    debug!("{:?} bytes to {:?}", len, addr);
 
     Ok(())
 }
