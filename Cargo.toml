@@ -11,6 +11,7 @@ clap = "4.2.1"
 hex = "0.4.3"
 lazy_static = "1.4.0"
 quick-protobuf = "0.8.1"
+range-set-blaze = "0.1.2"
 socket2 = "0.4.7"
 tokio = { version = "1.27.0", features = ["full"] }
 tracing = "0.1.37"
