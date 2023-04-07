@@ -140,7 +140,7 @@ impl ConnectedDevice {
         match message {
             Message::Statistics { tail } => {
                 self.total_records = Some(*tail);
-                self.total_records = Some(1000); // TESTING
+                // self.total_records = Some(1000); // TESTING
 
                 if let Some(range) = self.requires() {
                     let reply = Message::Require(range.clone());
@@ -284,7 +284,7 @@ impl Server {
 
                             let entry = devices.entry(discovered.device_id.clone());
                             let entry = entry.or_insert_with(|| ConnectedDevice {
-                                batch_size: 100,
+                                batch_size: 1000,
                                 discovered: discovered.clone(),
                                 state: DeviceState::Discovered,
                                 activity: Instant::now(),
