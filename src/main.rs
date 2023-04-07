@@ -26,27 +26,34 @@ pub struct Discovered {
     addr: SocketAddr,
 }
 
-fn get_device_id(bytes: &[u8]) -> Result<DeviceId> {
+enum Announce {
+    Hello(DeviceId),
+    Bye(DeviceId),
+}
+impl Announce {
+    fn device_id(&self) -> &DeviceId {
+        match self {
+            Announce::Hello(id) => id,
+            Announce::Bye(id) => id,
+        }
+    }
+}
+
+fn parse_announce(bytes: &[u8]) -> Result<Announce> {
     use quick_protobuf::BytesReader;
 
     let mut reader = BytesReader::from_bytes(bytes);
     let size = reader.read_varint32(bytes)?;
-    match size {
-        18 => {
-            let tag = reader.next_tag(bytes)?;
-            assert_eq!(tag >> 3, 1);
+    let tag = reader.next_tag(bytes)?;
+    assert_eq!(tag >> 3, 1);
+    let id_bytes = reader.read_bytes(bytes)?;
+    assert_eq!(id_bytes.len(), 16);
+    let device_id = DeviceId(hex::encode(id_bytes));
 
-            let id_bytes = reader.read_bytes(bytes)?;
-            assert_eq!(id_bytes.len(), 16);
-
-            Ok(DeviceId(hex::encode(id_bytes)))
-        }
-        20 => {
-            warn!("{}", hex::encode(bytes));
-
-            todo!()
-        }
-        _ => unimplemented!("{} bytes announce", size),
+    if size == 18 {
+        Ok(Announce::Hello(device_id))
+    } else {
+        Ok(Announce::Bye(device_id))
     }
 }
 
@@ -57,12 +64,6 @@ impl RecordRange {
     fn new(h: u64, t: u64) -> Self {
         Self((h, t))
     }
-
-    /*
-    fn all() -> Self {
-        Self((0, u32::MAX as u64))
-    }
-    */
 
     fn head(&self) -> u64 {
         self.0 .0
@@ -83,6 +84,13 @@ enum DeviceState {
     Learning,
     Receiving(RecordRange),
     Synced,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct Progress {
+    total: f32,
+    batch: f32,
 }
 
 impl DeviceState {}
@@ -113,7 +121,7 @@ impl ConnectedDevice {
                     return None;
                 }
 
-                info!("have range!");
+                info!("{:?} received", range);
 
                 if let Some(range) = self.requires() {
                     let reply = Message::Require(range.clone());
@@ -134,18 +142,18 @@ impl ConnectedDevice {
                 self.total_records = Some(*tail);
                 self.total_records = Some(1000); // TESTING
 
-                let range = self.requires().expect("required range expected");
-
-                let reply = Message::Require(range.clone());
-
-                self.state = DeviceState::Receiving(range);
-
-                Ok(Some(reply))
+                if let Some(range) = self.requires() {
+                    let reply = Message::Require(range.clone());
+                    self.state = DeviceState::Receiving(range);
+                    Ok(Some(reply))
+                } else {
+                    Ok(None)
+                }
             }
-            Message::Records { first, records } => {
-                self.received((0..records.len()).map(|v| v as u64 + *first));
+            Message::Records { head, records } => {
+                self.received((0..records.len()).map(|v| v as u64 + *head));
 
-                info!("{:?} progress {:.2}%", self.state, self.progress() * 100.0);
+                info!("{:?} {:?}", self.state, self.progress());
 
                 Ok(self.tick())
             }
@@ -175,15 +183,6 @@ impl ConnectedDevice {
     fn has_range(&self, range: &RecordRange) -> bool {
         let testing = range.into_set();
         let diff = &testing - &self.received;
-        if diff.len() != 0 {
-            info!(
-                "testing={:?} received={:?} diff={:?} {:?}",
-                testing.len(),
-                self.received.len(),
-                diff.len(),
-                diff
-            );
-        }
         diff.len() == 0
     }
 
@@ -200,18 +199,7 @@ impl ConnectedDevice {
         self.touch()
     }
 
-    /*
-    fn remaining(&self) -> RangeSetBlaze<u64> {
-        if let Some(total) = self.total_records {
-            let complete = RangeSetBlaze::from_iter([0..=total]);
-            complete - &self.received
-        } else {
-            RangeSetBlaze::new()
-        }
-    }
-    */
-
-    fn progress(&self) -> f32 {
+    fn completed(&self) -> f32 {
         if let Some(total) = self.total_records {
             let complete = RangeSetBlaze::from_iter([0..=total]);
             let p = self.received.len() as f32 / complete.len() as f32;
@@ -226,6 +214,27 @@ impl ConnectedDevice {
             }
         } else {
             0.0
+        }
+    }
+
+    fn batch(&self) -> f32 {
+        match &self.state {
+            DeviceState::Receiving(range) => {
+                let receiving = range.into_set();
+                let remaining = &receiving - &self.received;
+                1.0 - (remaining.len() as f32 / receiving.len() as f32)
+            }
+            _ => 0.0,
+        }
+    }
+
+    fn progress(&self) -> Option<Progress> {
+        match &self.state {
+            DeviceState::Receiving(_range) => Some(Progress {
+                total: self.completed(),
+                batch: self.batch(),
+            }),
+            _ => None,
         }
     }
 }
@@ -271,7 +280,7 @@ impl Server {
                 while let Some(cmd) = rx.recv().await {
                     match &cmd {
                         ServerCommand::Discovered(discovered) => {
-                            info!("{:?}", cmd);
+                            debug!("{:?}", cmd);
 
                             let entry = devices.entry(discovered.device_id.clone());
                             let entry = entry.or_insert_with(|| ConnectedDevice {
@@ -294,7 +303,7 @@ impl Server {
                             }
                         }
                         ServerCommand::Received(addr, message) => {
-                            info!("{:?}", message);
+                            debug!("{:?}", message);
 
                             if let Some(device_id) = device_id_by_addr.get(addr) {
                                 match devices.get_mut(device_id) {
@@ -425,9 +434,9 @@ impl Discovery {
             debug!("{} bytes from {}", len, addr);
 
             let bytes = &buffer[0..len];
-            let device_id = get_device_id(bytes)?;
+            let announced = parse_announce(bytes)?;
             let discovered = Discovered {
-                device_id,
+                device_id: announced.device_id().clone(),
                 addr: {
                     let mut addr = addr;
                     addr.set_port(22144);
@@ -516,7 +525,7 @@ enum Message {
     Query,
     Statistics { tail: u64 },
     Require(RecordRange),
-    Records { first: u64, records: Vec<RawRecord> },
+    Records { head: u64, records: Vec<RawRecord> },
 }
 
 impl Message {
@@ -538,7 +547,7 @@ impl Message {
                 Ok(Self::Require(RecordRange::new(head, tail)))
             }
             3 => {
-                let first = reader.read_fixed32(bytes)? as u64;
+                let head = reader.read_fixed32(bytes)? as u64;
 
                 let mut records: Vec<RawRecord> = Vec::new();
                 while !reader.is_eof() {
@@ -546,7 +555,7 @@ impl Message {
                     records.push(RawRecord(record.into()));
                 }
 
-                Ok(Self::Records { first, records })
+                Ok(Self::Records { head, records })
             }
             _ => todo!(),
         }
@@ -573,12 +582,10 @@ impl Message {
                 writer.write_fixed32(range.tail() as u32)?;
                 Ok(())
             }
-            Message::Records { first, records } => {
+            Message::Records { head, records } => {
                 writer.write_fixed32(3)?;
-                writer.write_fixed32(*first as u32)?;
-
+                writer.write_fixed32(*head as u32)?;
                 assert!(records.len() == 0); // Laziness
-
                 Ok(())
             }
         }
