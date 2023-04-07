@@ -1,8 +1,10 @@
 use anyhow::Result;
+use range_set_blaze::prelude::*;
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
+    time::Duration,
 };
 use tokio::{
     net::{ToSocketAddrs, UdpSocket},
@@ -10,9 +12,7 @@ use tokio::{
     sync::mpsc,
     sync::mpsc::Sender,
     sync::Mutex,
-    time::Instant,
-    // task,
-    // time::{sleep, Duration},
+    time::{self, Instant},
 };
 use tracing::*;
 use tracing_subscriber::prelude::*;
@@ -41,46 +41,200 @@ fn get_device_id(bytes: &[u8]) -> Result<DeviceId> {
 
             Ok(DeviceId(hex::encode(id_bytes)))
         }
-        _ => todo!(),
+        20 => {
+            warn!("{}", hex::encode(bytes));
+
+            todo!()
+        }
+        _ => unimplemented!("{} bytes announce", size),
     }
 }
 
-enum DeviceState {
-    JustDiscovered,
-    Querying,
+#[derive(Debug, Clone)]
+struct RecordRange((u64, u64));
+
+impl RecordRange {
+    fn new(h: u64, t: u64) -> Self {
+        Self((h, t))
+    }
+
+    /*
+    fn all() -> Self {
+        Self((0, u32::MAX as u64))
+    }
+    */
+
+    fn head(&self) -> u64 {
+        self.0 .0
+    }
+
+    fn tail(&self) -> u64 {
+        self.0 .1
+    }
+
+    fn into_set(&self) -> RangeSetBlaze<u64> {
+        RangeSetBlaze::from_iter([self.head()..=self.tail() - 1])
+    }
 }
 
+#[derive(Debug)]
+enum DeviceState {
+    Discovered,
+    Learning,
+    Receiving(RecordRange),
+    Synced,
+}
+
+impl DeviceState {}
+
+#[derive(Debug)]
 #[allow(dead_code)]
 struct ConnectedDevice {
+    batch_size: u64,
     discovered: Discovered,
     state: DeviceState,
     activity: Instant,
+    total_records: Option<u64>,
+    received: RangeSetBlaze<u64>,
 }
 
 impl ConnectedDevice {
-    fn should_query(&mut self) -> bool {
-        match self.state {
-            DeviceState::JustDiscovered => {
-                self.state = DeviceState::Querying;
-                self.activity = Instant::now();
-                true
+    fn tick(&mut self) -> Option<Message> {
+        match &self.state {
+            DeviceState::Discovered => {
+                self.received.clear();
+                self.touch();
+                self.state = DeviceState::Learning;
+
+                Some(Message::Query)
             }
-            DeviceState::Querying => {
-                if Instant::now() - self.activity > std::time::Duration::from_secs(30) {
-                    self.activity = Instant::now();
-                    true
+            DeviceState::Receiving(range) => {
+                if !self.has_range(range) {
+                    return None;
+                }
+
+                info!("have range!");
+
+                if let Some(range) = self.requires() {
+                    let reply = Message::Require(range.clone());
+                    self.state = DeviceState::Receiving(range);
+                    Some(reply)
                 } else {
-                    false
+                    self.state = DeviceState::Synced;
+                    None
                 }
             }
+            _ => None,
+        }
+    }
+
+    fn handle(&mut self, message: &Message) -> Result<Option<Message>> {
+        match message {
+            Message::Statistics { tail } => {
+                self.total_records = Some(*tail);
+                self.total_records = Some(1000); // TESTING
+
+                let range = self.requires().expect("required range expected");
+
+                let reply = Message::Require(range.clone());
+
+                self.state = DeviceState::Receiving(range);
+
+                Ok(Some(reply))
+            }
+            Message::Records { first, records } => {
+                self.received((0..records.len()).map(|v| v as u64 + *first));
+
+                info!("{:?} progress {:.2}%", self.state, self.progress() * 100.0);
+
+                Ok(self.tick())
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn requires(&self) -> Option<RecordRange> {
+        if self.total_records.is_none() {
+            return None;
+        }
+
+        let total = self.total_records.unwrap();
+
+        match self.received.last() {
+            Some(last) => {
+                if last >= total {
+                    None
+                } else {
+                    Some(RecordRange::new(last, last + self.batch_size))
+                }
+            }
+            _ => Some(RecordRange::new(0, self.batch_size)),
+        }
+    }
+
+    fn has_range(&self, range: &RecordRange) -> bool {
+        let testing = range.into_set();
+        let diff = &testing - &self.received;
+        if diff.len() != 0 {
+            info!(
+                "testing={:?} received={:?} diff={:?} {:?}",
+                testing.len(),
+                self.received.len(),
+                diff.len(),
+                diff
+            );
+        }
+        diff.len() == 0
+    }
+
+    fn touch(&mut self) {
+        self.activity = Instant::now();
+    }
+
+    fn received<I>(&mut self, records: I)
+    where
+        I: Iterator<Item = u64>,
+    {
+        let mut appending = RangeSetBlaze::from_iter(records);
+        self.received.append(&mut appending);
+        self.touch()
+    }
+
+    /*
+    fn remaining(&self) -> RangeSetBlaze<u64> {
+        if let Some(total) = self.total_records {
+            let complete = RangeSetBlaze::from_iter([0..=total]);
+            complete - &self.received
+        } else {
+            RangeSetBlaze::new()
+        }
+    }
+    */
+
+    fn progress(&self) -> f32 {
+        if let Some(total) = self.total_records {
+            let complete = RangeSetBlaze::from_iter([0..=total]);
+            let p = self.received.len() as f32 / complete.len() as f32;
+
+            // We can receive more records than we ask for and this is probably
+            // better than excluding them since, well, we do have those extra
+            // records haha
+            if p > 1.0 {
+                1.0
+            } else {
+                p
+            }
+        } else {
+            0.0
         }
     }
 }
 
 #[derive(Debug)]
 enum ServerCommand {
-    StartSyncing(Discovered),
-    Reply(SocketAddr, Message),
+    Discovered(Discovered),
+    Received(SocketAddr, Message),
+    Tick,
 }
 
 struct Server {
@@ -106,7 +260,8 @@ impl Server {
 
         info!("listening on {}", addr);
 
-        let mut devices = HashMap::<DeviceId, ConnectedDevice>::default();
+        let mut device_id_by_addr: HashMap<SocketAddr, DeviceId> = HashMap::new();
+        let mut devices: HashMap<DeviceId, ConnectedDevice> = HashMap::new();
         let (tx, mut rx) = mpsc::channel::<ServerCommand>(32);
 
         let pump = tokio::spawn({
@@ -115,45 +270,51 @@ impl Server {
             async move {
                 while let Some(cmd) = rx.recv().await {
                     match &cmd {
-                        ServerCommand::StartSyncing(discovered) => {
+                        ServerCommand::Discovered(discovered) => {
                             info!("{:?}", cmd);
 
                             let entry = devices.entry(discovered.device_id.clone());
                             let entry = entry.or_insert_with(|| ConnectedDevice {
+                                batch_size: 100,
                                 discovered: discovered.clone(),
-                                state: DeviceState::JustDiscovered,
+                                state: DeviceState::Discovered,
                                 activity: Instant::now(),
+                                total_records: None,
+                                received: RangeSetBlaze::new(),
                             });
 
-                            if entry.should_query() {
-                                transmit(&sending, &discovered.addr, &Message::Query)
+                            device_id_by_addr
+                                .entry(discovered.addr)
+                                .or_insert(discovered.device_id.clone());
+
+                            if let Some(message) = entry.tick() {
+                                transmit(&sending, &discovered.addr, &message)
                                     .await
                                     .expect("send failed");
                             }
                         }
-                        ServerCommand::Reply(addr, reply) => {
-                            info!("{:?}", reply);
+                        ServerCommand::Received(addr, message) => {
+                            info!("{:?}", message);
 
-                            match reply {
-                                Message::Query => todo!(),
-                                Message::Statistics { tail } => {
-                                    info!("requiring {}", tail);
+                            if let Some(device_id) = device_id_by_addr.get(addr) {
+                                match devices.get_mut(device_id) {
+                                    Some(connected) => {
+                                        let reply = connected
+                                            .handle(message)
+                                            .expect("failed handling message");
 
-                                    let reply = Message::Require {
-                                        first: 0,
-                                        // tail: *tail,
-                                        tail: 100,
-                                    };
-
-                                    transmit(&sending, &addr, &reply)
-                                        .await
-                                        .expect("send failed");
+                                        if let Some(reply) = reply {
+                                            transmit(&sending, &addr, &reply)
+                                                .await
+                                                .expect("send failed");
+                                        }
+                                    }
+                                    None => todo!(),
                                 }
-                                #[allow(unused_variables)]
-                                Message::Require { first, tail } => todo!(),
-                                #[allow(unused_variables)]
-                                Message::Records { first, records } => {}
-                            }
+                            };
+                        }
+                        ServerCommand::Tick => {
+                            // TODO Cheeck for stalled Receiving states.
                         }
                     }
                 }
@@ -161,6 +322,8 @@ impl Server {
         });
 
         let receive = tokio::spawn({
+            let tx = tx.clone();
+
             async move {
                 let mut buffer = vec![0u8; 4096];
 
@@ -174,10 +337,21 @@ impl Server {
 
                     let message = Message::read(&buffer[0..len]).expect("parse failed");
 
-                    tx.send(ServerCommand::Reply(addr, message))
+                    tx.send(ServerCommand::Received(addr, message))
                         .await
                         .expect("send self failed");
                 }
+            }
+        });
+
+        let timer = tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_millis(1000));
+
+            loop {
+                interval.tick().await;
+                tx.send(ServerCommand::Tick)
+                    .await
+                    .expect("send self failed");
             }
         });
 
@@ -190,11 +364,15 @@ impl Server {
                 println!("receive pump done");
                 Ok(())
             },
+            _ = timer => {
+                println!("timer done");
+                Ok(())
+            }
         }
     }
 
     pub async fn sync(&self, discovered: Discovered) -> Result<()> {
-        self.send(ServerCommand::StartSyncing(discovered)).await
+        self.send(ServerCommand::Discovered(discovered)).await
     }
 
     async fn send(&self, cmd: ServerCommand) -> Result<()> {
@@ -337,7 +515,7 @@ impl std::fmt::Debug for RawRecord {
 enum Message {
     Query,
     Statistics { tail: u64 },
-    Require { first: u64, tail: u64 },
+    Require(RecordRange),
     Records { first: u64, records: Vec<RawRecord> },
 }
 
@@ -355,9 +533,9 @@ impl Message {
                 Ok(Self::Statistics { tail })
             }
             2 => {
-                let first = reader.read_fixed32(bytes)? as u64;
+                let head = reader.read_fixed32(bytes)? as u64;
                 let tail = reader.read_fixed32(bytes)? as u64;
-                Ok(Self::Require { first, tail })
+                Ok(Self::Require(RecordRange::new(head, tail)))
             }
             3 => {
                 let first = reader.read_fixed32(bytes)? as u64;
@@ -389,10 +567,10 @@ impl Message {
                 writer.write_fixed32(*tail as u32)?;
                 Ok(())
             }
-            Message::Require { first, tail } => {
+            Message::Require(range) => {
                 writer.write_fixed32(2)?;
-                writer.write_fixed32(*first as u32)?;
-                writer.write_fixed32(*tail as u32)?;
+                writer.write_fixed32(range.head() as u32)?;
+                writer.write_fixed32(range.tail() as u32)?;
                 Ok(())
             }
             Message::Records { first, records } => {
