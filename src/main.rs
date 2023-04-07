@@ -86,11 +86,38 @@ enum DeviceState {
     Synced,
 }
 
-#[derive(Debug)]
+#[allow(dead_code)]
+struct BatchProgress {
+    completed: f32,
+    total: usize,
+    received: usize,
+}
+
+impl std::fmt::Debug for BatchProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "{:.2}% ({}/{})",
+            self.completed, self.received, self.total
+        ))
+    }
+}
+
 #[allow(dead_code)]
 struct Progress {
-    total: f32,
-    batch: f32,
+    total: Option<BatchProgress>,
+    batch: Option<BatchProgress>,
+}
+
+impl std::fmt::Debug for Progress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.total, &self.batch) {
+            (Some(total), Some(batch)) => {
+                f.write_fmt(format_args!("T({:?}) B({:?})", total, batch))
+            }
+            (None, None) => f.write_str("None"),
+            (_, _) => f.write_str("Nonsensical Progress"),
+        }
+    }
 }
 
 impl DeviceState {}
@@ -199,32 +226,43 @@ impl ConnectedDevice {
         self.touch()
     }
 
-    fn completed(&self) -> f32 {
+    fn completed(&self) -> Option<BatchProgress> {
         if let Some(total) = self.total_records {
             let complete = RangeSetBlaze::from_iter([0..=total]);
-            let p = self.received.len() as f32 / complete.len() as f32;
-
+            let total = complete.len() as usize;
+            let received = self.received.len() as usize;
+            let p = received as f32 / total as f32;
             // We can receive more records than we ask for and this is probably
             // better than excluding them since, well, we do have those extra
             // records haha
-            if p > 1.0 {
-                1.0
-            } else {
-                p
-            }
+            let p = if p > 1.0 { 1.0 } else { p };
+
+            Some(BatchProgress {
+                completed: p,
+                total: total,
+                received: received,
+            })
         } else {
-            0.0
+            None
         }
     }
 
-    fn batch(&self) -> f32 {
+    fn batch(&self) -> Option<BatchProgress> {
         match &self.state {
             DeviceState::Receiving(range) => {
                 let receiving = range.into_set();
                 let remaining = &receiving - &self.received;
-                1.0 - (remaining.len() as f32 / receiving.len() as f32)
+                let total = receiving.len() as usize;
+                let received = total - remaining.len() as usize;
+                let p = received as f32 / total as f32;
+
+                Some(BatchProgress {
+                    completed: p,
+                    total: total,
+                    received: received,
+                })
             }
-            _ => 0.0,
+            _ => None,
         }
     }
 
@@ -528,6 +566,11 @@ enum Message {
     Records { head: u64, records: Vec<RawRecord> },
 }
 
+const FK_UDP_PROTOCOL_KIND_QUERY: u32 = 0;
+const FK_UDP_PROTOCOL_KIND_STATISTICS: u32 = 1;
+const FK_UDP_PROTOCOL_KIND_REQUIRE: u32 = 2;
+const FK_UDP_PROTOCOL_KIND_RECORDS: u32 = 3;
+
 impl Message {
     fn read(bytes: &[u8]) -> Result<Self> {
         use quick_protobuf::reader::BytesReader;
@@ -536,19 +579,18 @@ impl Message {
         let kind = reader.read_fixed32(bytes)?;
 
         match kind {
-            0 => Ok(Self::Query {}),
-            1 => {
+            FK_UDP_PROTOCOL_KIND_QUERY => Ok(Self::Query {}),
+            FK_UDP_PROTOCOL_KIND_STATISTICS => {
                 let tail = reader.read_fixed32(bytes)? as u64;
                 Ok(Self::Statistics { tail })
             }
-            2 => {
+            FK_UDP_PROTOCOL_KIND_REQUIRE => {
                 let head = reader.read_fixed32(bytes)? as u64;
                 let tail = reader.read_fixed32(bytes)? as u64;
                 Ok(Self::Require(RecordRange::new(head, tail)))
             }
-            3 => {
+            FK_UDP_PROTOCOL_KIND_RECORDS => {
                 let head = reader.read_fixed32(bytes)? as u64;
-
                 let mut records: Vec<RawRecord> = Vec::new();
                 while !reader.is_eof() {
                     let record = reader.read_bytes(bytes)?;
