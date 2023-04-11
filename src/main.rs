@@ -112,10 +112,10 @@ impl std::fmt::Debug for Progress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (&self.total, &self.batch) {
             (Some(total), Some(batch)) => {
-                f.write_fmt(format_args!("T({:?}) B({:?})", total, batch))
+                f.write_fmt(format_args!("B({:?}) T({:?})", batch, total))
             }
-            (None, None) => f.write_str("None"),
-            (_, _) => f.write_str("Nonsensical Progress"),
+            (None, None) => f.write_fmt(format_args!("Activity={:?}", &self.last_activity)),
+            (_, _) => todo!("Nonsensical progress!"),
         }
     }
 }
@@ -123,9 +123,9 @@ impl std::fmt::Debug for Progress {
 impl DeviceState {}
 
 #[derive(Debug)]
-#[allow(dead_code)]
 struct ConnectedDevice {
     batch_size: u64,
+    #[allow(dead_code)]
     discovered: Discovered,
     state: DeviceState,
     activity: Instant,
@@ -148,13 +148,13 @@ impl ConnectedDevice {
                     return None;
                 }
 
-                info!("{:?} received", range);
-
                 if let Some(range) = self.requires() {
+                    info!("{:?} received, requiring {:?}", range, range);
                     let reply = Message::Require(range.clone());
                     self.state = DeviceState::Receiving(range);
                     Some(reply)
                 } else {
+                    info!("{:?} received, synced", range);
                     self.state = DeviceState::Synced;
                     None
                 }
@@ -167,8 +167,6 @@ impl ConnectedDevice {
         match message {
             Message::Statistics { tail } => {
                 self.total_records = Some(*tail);
-                // self.total_records = Some(1000); // TESTING
-
                 if let Some(range) = self.requires() {
                     let reply = Message::Require(range.clone());
                     self.state = DeviceState::Receiving(range);
@@ -177,10 +175,22 @@ impl ConnectedDevice {
                     Ok(None)
                 }
             }
-            Message::Records { head, records } => {
-                self.received((0..records.len()).map(|v| v as u64 + *head));
+            Message::Records {
+                head,
+                flags: _flags,
+                records,
+            } => {
+                // Include the received records in our received set.
+                let just_received: Vec<u64> =
+                    (0..records.len()).map(|v| v as u64 + *head).collect();
+                self.received(just_received.into_iter());
 
-                info!("{:?} {:?}", self.state, self.progress());
+                info!(
+                    "{:?} {:?} {:?}",
+                    self.state,
+                    self.progress(),
+                    &self.received_has_gaps()
+                );
 
                 Ok(self.tick())
             }
@@ -231,16 +241,16 @@ impl ConnectedDevice {
             let complete = RangeSetBlaze::from_iter([0..=total]);
             let total = complete.len() as usize;
             let received = self.received.len() as usize;
-            let p = received as f32 / total as f32;
+            let completed = received as f32 / total as f32;
             // We can receive more records than we ask for and this is probably
             // better than excluding them since, well, we do have those extra
             // records haha
-            let p = if p > 1.0 { 1.0 } else { p };
+            let completed = if completed > 1.0 { 1.0 } else { completed };
 
             Some(BatchProgress {
-                completed: p,
-                total: total,
-                received: received,
+                completed,
+                total,
+                received,
             })
         } else {
             None
@@ -254,12 +264,12 @@ impl ConnectedDevice {
                 let remaining = &receiving - &self.received;
                 let total = receiving.len() as usize;
                 let received = total - remaining.len() as usize;
-                let p = received as f32 / total as f32;
+                let completed = received as f32 / total as f32;
 
                 Some(BatchProgress {
-                    completed: p,
-                    total: total,
-                    received: received,
+                    completed,
+                    total,
+                    received,
                 })
             }
             _ => None,
@@ -301,11 +311,11 @@ impl Default for Server {
 impl Server {
     pub async fn run(&self) -> Result<()> {
         const IP_ALL: [u8; 4] = [0, 0, 0, 0];
-        let addr = SocketAddrV4::new(IP_ALL.into(), self.port);
-        let receiving = Arc::new(self.bind(&addr)?);
+        let listening_addr = SocketAddrV4::new(IP_ALL.into(), self.port);
+        let receiving = Arc::new(self.bind(&listening_addr)?);
         let sending = receiving.clone();
 
-        info!("listening on {}", addr);
+        info!("listening on {}", listening_addr);
 
         let mut device_id_by_addr: HashMap<SocketAddr, DeviceId> = HashMap::new();
         let mut devices: HashMap<DeviceId, ConnectedDevice> = HashMap::new();
@@ -341,7 +351,7 @@ impl Server {
                             }
                         }
                         ServerCommand::Received(addr, message) => {
-                            debug!("{:?}", message);
+                            message.log_received();
 
                             if let Some(device_id) = device_id_by_addr.get(addr) {
                                 match devices.get_mut(device_id) {
@@ -380,7 +390,7 @@ impl Server {
                         .await
                         .expect("recv failed");
 
-                    debug!("{} bytes from {}", len, addr);
+                    trace!("{} bytes from {}", len, addr);
 
                     let message = Message::read(&buffer[0..len]).expect("parse failed");
 
@@ -418,7 +428,7 @@ impl Server {
         }
     }
 
-    pub async fn sync(&self, discovered: Discovered) -> Result<()> {
+    async fn sync(&self, discovered: Discovered) -> Result<()> {
         self.send(ServerCommand::Discovered(discovered)).await
     }
 
@@ -469,7 +479,7 @@ impl Discovery {
 
         loop {
             let (len, addr) = receiving.recv_from(&mut buffer[..]).await?;
-            debug!("{} bytes from {}", len, addr);
+            trace!("{} bytes from {}", len, addr);
 
             let bytes = &buffer[0..len];
             let announced = parse_announce(bytes)?;
@@ -482,7 +492,7 @@ impl Discovery {
                 },
             };
 
-            debug!("discovered {:?}", discovered);
+            trace!("discovered {:?}", discovered);
 
             publisher.send(discovered).await?;
         }
@@ -630,6 +640,17 @@ impl Message {
                 assert!(records.len() == 0); // Laziness
                 Ok(())
             }
+        }
+    }
+
+    fn log_received(&self) {
+        match self {
+            Message::Records {
+                head: _head,
+                flags: _flags,
+                records: _records,
+            } => trace!("{:?}", self),
+            _ => debug!("{:?}", self),
         }
     }
 }
