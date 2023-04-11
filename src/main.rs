@@ -571,9 +571,15 @@ impl std::fmt::Debug for RawRecord {
 #[derive(Debug)]
 enum Message {
     Query,
-    Statistics { tail: u64 },
+    Statistics {
+        tail: u64,
+    },
     Require(RecordRange),
-    Records { head: u64, records: Vec<RawRecord> },
+    Records {
+        head: u64,
+        flags: u32,
+        records: Vec<RawRecord>,
+    },
 }
 
 const FK_UDP_PROTOCOL_KIND_QUERY: u32 = 0;
@@ -601,13 +607,18 @@ impl Message {
             }
             FK_UDP_PROTOCOL_KIND_RECORDS => {
                 let head = reader.read_fixed32(bytes)? as u64;
+                let flags = reader.read_fixed32(bytes)?;
                 let mut records: Vec<RawRecord> = Vec::new();
                 while !reader.is_eof() {
                     let record = reader.read_bytes(bytes)?;
                     records.push(RawRecord(record.into()));
                 }
 
-                Ok(Self::Records { head, records })
+                Ok(Self::Records {
+                    head,
+                    flags,
+                    records,
+                })
             }
             _ => todo!(),
         }
@@ -634,9 +645,14 @@ impl Message {
                 writer.write_fixed32(range.tail() as u32)?;
                 Ok(())
             }
-            Message::Records { head, records } => {
+            Message::Records {
+                head,
+                flags,
+                records,
+            } => {
                 writer.write_fixed32(3)?;
                 writer.write_fixed32(*head as u32)?;
+                writer.write_fixed32(*flags as u32)?;
                 assert!(records.len() == 0); // Laziness
                 Ok(())
             }
