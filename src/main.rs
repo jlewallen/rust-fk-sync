@@ -3,6 +3,7 @@ use range_set_blaze::prelude::*;
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    ops::RangeInclusive,
     sync::Arc,
     time::Duration,
 };
@@ -60,6 +61,12 @@ fn parse_announce(bytes: &[u8]) -> Result<Announce> {
 #[derive(Debug, Clone)]
 struct RecordRange((u64, u64));
 
+impl From<&RangeInclusive<u64>> for RecordRange {
+    fn from(value: &RangeInclusive<u64>) -> Self {
+        RecordRange((*value.start(), *value.end() + 1))
+    }
+}
+
 impl RecordRange {
     fn new(h: u64, t: u64) -> Self {
         Self((h, t))
@@ -86,7 +93,6 @@ enum DeviceState {
     Synced,
 }
 
-#[allow(dead_code)]
 struct BatchProgress {
     completed: f32,
     total: usize,
@@ -104,6 +110,7 @@ impl std::fmt::Debug for BatchProgress {
 
 #[allow(dead_code)]
 struct Progress {
+    last_activity: Duration,
     total: Option<BatchProgress>,
     batch: Option<BatchProgress>,
 }
@@ -204,16 +211,19 @@ impl ConnectedDevice {
         }
 
         let total = self.total_records.unwrap();
-
         match self.received.last() {
             Some(last) => {
-                if last >= total {
-                    None
+                let last = last + 1;
+                if last < total {
+                    Some(RecordRange::new(
+                        last,
+                        std::cmp::min(last + self.batch_size, total),
+                    ))
                 } else {
-                    Some(RecordRange::new(last, last + self.batch_size))
+                    None
                 }
             }
-            _ => Some(RecordRange::new(0, self.batch_size)),
+            _ => Some(RecordRange::new(0, std::cmp::min(self.batch_size, total))),
         }
     }
 
@@ -279,12 +289,54 @@ impl ConnectedDevice {
     fn progress(&self) -> Option<Progress> {
         match &self.state {
             DeviceState::Receiving(_range) => Some(Progress {
+                last_activity: self.last_activity(),
                 total: self.completed(),
                 batch: self.batch(),
             }),
             _ => None,
         }
     }
+
+    fn last_activity(&self) -> Duration {
+        Instant::now() - self.activity
+    }
+
+    fn is_stalled(&self) -> bool {
+        match &self.state {
+            DeviceState::Receiving(_) => self.last_activity() > Duration::from_secs(20),
+            _ => false,
+        }
+    }
+
+    fn received_has_gaps(&self) -> HasGaps {
+        match self.received.last() {
+            Some(last) => {
+                if last as u128 + 1 == self.received.len() {
+                    HasGaps::Continuous((0, last))
+                } else {
+                    let inverted = RangeSetBlaze::from_iter([0..=last]) - &self.received;
+                    let gaps = inverted
+                        .into_ranges()
+                        .collect::<Vec<std::ops::RangeInclusive<_>>>();
+                    HasGaps::HasGaps(gaps)
+                }
+            }
+            None => HasGaps::Continuous((0, 0)),
+        }
+    }
+
+    fn recover(&mut self) -> Option<Message> {
+        match self.received_has_gaps() {
+            HasGaps::Continuous(_) => None,
+            HasGaps::HasGaps(gaps) => Some(Message::Require(gaps.get(0).unwrap().into())),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum HasGaps {
+    Continuous((u64, u64)),
+    HasGaps(Vec<RangeInclusive<u64>>),
 }
 
 #[derive(Debug)]
@@ -372,6 +424,24 @@ impl Server {
                         }
                         ServerCommand::Tick => {
                             // TODO Cheeck for stalled Receiving states.
+                            for (device_id, connected) in devices.iter_mut() {
+                                if connected.is_stalled() {
+                                    let last_activity = connected.last_activity();
+                                    info!(
+                                        "{:?} stalled {:?} {:?}",
+                                        device_id,
+                                        &last_activity,
+                                        &connected.received_has_gaps()
+                                    );
+
+                                    if let Some(reply) = connected.recover() {
+                                        let addr = &connected.discovered.addr;
+                                        transmit(&sending, addr, &reply)
+                                            .await
+                                            .expect("send failed");
+                                    }
+                                }
+                            }
                         }
                     }
                 }
