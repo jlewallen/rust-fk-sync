@@ -1,4 +1,5 @@
 use anyhow::Result;
+use backoff::{backoff::Backoff, ExponentialBackoff, ExponentialBackoffBuilder};
 use range_set_blaze::prelude::*;
 use std::{
     collections::HashMap,
@@ -89,6 +90,8 @@ struct ConnectedDevice {
     received_at: Instant,
     total_records: Option<u64>,
     received: RangeSetBlaze<u64>,
+    backoff: ExponentialBackoff,
+    waiting_until: Option<Instant>,
 }
 
 impl ConnectedDevice {
@@ -101,7 +104,17 @@ impl ConnectedDevice {
             received_at: Instant::now(),
             total_records: None,
             received: RangeSetBlaze::new(),
+            backoff: Self::stall_backoff(),
+            waiting_until: None,
         }
+    }
+
+    fn stall_backoff() -> ExponentialBackoff {
+        ExponentialBackoffBuilder::new()
+            .with_initial_interval(Duration::from_millis(5000))
+            .with_randomization_factor(0.0)
+            .with_multiplier(1.8)
+            .build()
     }
 
     fn tick(&mut self) -> Option<Message> {
@@ -115,13 +128,18 @@ impl ConnectedDevice {
             _ => {
                 if self.is_stalled() {
                     info!(
-                        "{:?} stalled {:?} {:?}",
+                        "{:?} STALL {:?} {:?}",
                         self.device_id,
                         self.last_received_at(),
                         self.received_has_gaps()
                     );
 
-                    self.query_requires()
+                    if let Some(delay) = self.backoff.next_backoff() {
+                        self.waiting_until = Some(Instant::now() + delay);
+                        self.query_requires()
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -131,6 +149,8 @@ impl ConnectedDevice {
 
     fn handle(&mut self, message: &Message) -> Result<Option<Message>> {
         self.received_at = Instant::now();
+        self.backoff.reset();
+        self.waiting_until = None;
 
         match &self.state {
             DeviceState::Expecting((_deadline, after)) => {
@@ -156,9 +176,10 @@ impl ConnectedDevice {
                 self.received(just_received);
 
                 info!(
-                    "{:?} {:?} {:?}",
+                    "{:?} {} {:?}",
                     self.state,
-                    self.progress(),
+                    self.progress()
+                        .map_or("".to_owned(), |f| format!("{:?}", f)),
                     &self.received_has_gaps()
                 );
 
@@ -232,6 +253,12 @@ impl ConnectedDevice {
     }
 
     fn is_stalled(&self) -> bool {
+        if let Some(waiting_until) = self.waiting_until {
+            if Instant::now() < waiting_until {
+                return false;
+            }
+        }
+
         match &self.state {
             DeviceState::Expecting(_) => {
                 self.last_received_at() > Duration::from_millis(STALLED_EXPECTING_MILLIS)
@@ -672,7 +699,8 @@ impl Message {
             FK_UDP_PROTOCOL_KIND_REQUIRE => {
                 let head = reader.read_fixed32(bytes)? as u64;
                 let tail = reader.read_fixed32(bytes)? as u64;
-                Ok(Self::Require(RecordRange::new(head, tail)))
+                assert!(tail > head);
+                Ok(Self::Require(RecordRange::new(head, tail - 1)))
             }
             FK_UDP_PROTOCOL_KIND_RECORDS => {
                 let head = reader.read_fixed32(bytes)? as u64;
@@ -716,7 +744,7 @@ impl Message {
             Message::Require(range) => {
                 writer.write_fixed32(2)?;
                 writer.write_fixed32(range.head() as u32)?;
-                writer.write_fixed32(range.tail() as u32)?;
+                writer.write_fixed32(range.tail() as u32 + 1)?;
                 Ok(())
             }
             Message::Records {
@@ -837,5 +865,12 @@ mod tests {
         connected.total_records = Some(100_000);
         connected.received(RangeSetBlaze::from_iter([0..=100_000]));
         assert_eq!(connected.requires(), None);
+    }
+
+    #[test]
+    pub fn test_backoff_is_sensibly_tuned() {
+        let mut backoff = ConnectedDevice::stall_backoff();
+        assert_eq!(backoff.next_backoff(), Some(Duration::from_millis(5000)));
+        assert_eq!(backoff.next_backoff(), Some(Duration::from_millis(9000)));
     }
 }
