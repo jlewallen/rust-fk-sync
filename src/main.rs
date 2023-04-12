@@ -48,32 +48,33 @@ impl DeviceState {
     }
 }
 
-struct BatchProgress {
+struct RangeProgress {
+    range: RangeInclusive<u64>,
     completed: f32,
     total: usize,
     received: usize,
 }
 
-impl std::fmt::Debug for BatchProgress {
+impl std::fmt::Debug for RangeProgress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
-            "{:.2} ({}/{})",
-            self.completed, self.received, self.total
+            "{:.3} ({}/{}, {:?})",
+            self.completed, self.received, self.total, self.range
         ))
     }
 }
 
 #[allow(dead_code)]
 struct Progress {
-    total: Option<BatchProgress>,
-    batch: Option<BatchProgress>,
+    total: Option<RangeProgress>,
+    batch: Option<RangeProgress>,
 }
 
 impl std::fmt::Debug for Progress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (&self.total, &self.batch) {
             (Some(total), Some(batch)) => {
-                f.write_fmt(format_args!("B({:?}) T({:?})", batch, total))
+                f.write_fmt(format_args!("T({:?}) B({:?})", total, batch))
             }
             (None, None) => f.write_str("Idle"),
             (_, _) => todo!("Nonsensical progress!"),
@@ -175,13 +176,10 @@ impl ConnectedDevice {
                     (0..records.len()).map(|v| v as u64 + *head).collect();
                 self.received(just_received);
 
-                info!(
-                    "{:?} {} {:?}",
-                    self.state,
-                    self.progress()
-                        .map_or("".to_owned(), |f| format!("{:?}", f)),
-                    &self.received_has_gaps()
-                );
+                let progress = self.progress();
+                let has_gaps = self.received_has_gaps();
+                let progress = progress.map_or("".to_owned(), |f| format!("{:?}", f));
+                info!("{} {:?}", progress, &has_gaps);
 
                 Ok(None)
             }
@@ -288,9 +286,10 @@ impl ConnectedDevice {
         }
     }
 
-    fn completed(&self) -> Option<BatchProgress> {
+    fn completed(&self) -> Option<RangeProgress> {
         if let Some(total) = self.total_records {
-            let complete = RangeSetBlaze::from_iter([0..=total]);
+            let range = 0..=total;
+            let complete = RangeSetBlaze::from_iter([range.clone()]);
             let total = complete.len() as usize;
             let received = self.received.len() as usize;
             let completed = received as f32 / total as f32;
@@ -299,7 +298,8 @@ impl ConnectedDevice {
             // records haha
             let completed = if completed > 1.0 { 1.0 } else { completed };
 
-            Some(BatchProgress {
+            Some(RangeProgress {
+                range,
                 completed,
                 total,
                 received,
@@ -309,7 +309,7 @@ impl ConnectedDevice {
         }
     }
 
-    fn batch(&self) -> Option<BatchProgress> {
+    fn batch(&self) -> Option<RangeProgress> {
         match &self.state {
             DeviceState::Receiving(range) => {
                 let receiving = range.into_set();
@@ -318,7 +318,8 @@ impl ConnectedDevice {
                 let received = total - remaining.len() as usize;
                 let completed = received as f32 / total as f32;
 
-                Some(BatchProgress {
+                Some(RangeProgress {
+                    range: range.clone().into(),
                     completed,
                     total,
                     received,
@@ -606,15 +607,9 @@ async fn main() -> Result<()> {
     });
 
     Ok(tokio::select! {
-        _ = discovery.run(tx) => {
-            println!("discovery done")
-        },
-        _ = server.run() => {
-            println!("server done")
-        },
-        _ = pump => {
-            println!("pump done")
-        },
+        _ = discovery.run(tx) => {},
+        _ = server.run() => {},
+        _ = pump => {},
         res = signal::ctrl_c() => {
             return res.map_err(|e| e.into())
         },
@@ -643,6 +638,12 @@ impl RecordRange {
 
     fn into_set(&self) -> RangeSetBlaze<u64> {
         RangeSetBlaze::from_iter([self.head()..=self.tail() - 1])
+    }
+}
+
+impl Into<RangeInclusive<u64>> for RecordRange {
+    fn into(self) -> RangeInclusive<u64> {
+        self.0.clone()
     }
 }
 
