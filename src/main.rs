@@ -18,8 +18,10 @@ use tokio::{
 use tracing::*;
 use tracing_subscriber::prelude::*;
 
-const STALL_SECONDS: u64 = 5;
-const EXPIRE_SECONDS: u64 = 120;
+const IP_ALL: [u8; 4] = [0, 0, 0, 0];
+const STALLED_EXPECTING_MILLIS: u64 = 5000;
+const STALLED_RECEIVING_MILLIS: u64 = 500;
+const EXPIRED_MILLIS: u64 = 1000 * 60 * 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct DeviceId(String);
@@ -30,40 +32,19 @@ pub struct Discovered {
     addr: SocketAddr,
 }
 
-#[derive(Debug, Clone)]
-struct RecordRange((u64, u64));
-
-impl RecordRange {
-    fn new(h: u64, t: u64) -> Self {
-        Self((h, t))
-    }
-
-    fn head(&self) -> u64 {
-        self.0 .0
-    }
-
-    fn tail(&self) -> u64 {
-        self.0 .1
-    }
-
-    fn into_set(&self) -> RangeSetBlaze<u64> {
-        RangeSetBlaze::from_iter([self.head()..=self.tail() - 1])
-    }
-}
-
-impl From<&RangeInclusive<u64>> for RecordRange {
-    fn from(value: &RangeInclusive<u64>) -> Self {
-        RecordRange((*value.start(), *value.end() + 1))
-    }
-}
-
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum DeviceState {
     Discovered,
     Learning,
     Receiving(RecordRange),
-    Expecting((Instant, Box<DeviceState>)),
+    Expecting((f32, Box<DeviceState>)),
     Synced,
+}
+
+impl DeviceState {
+    fn expecting(after: Self) -> Self {
+        Self::Expecting((0.0, Box::new(after)))
+    }
 }
 
 struct BatchProgress {
@@ -83,7 +64,6 @@ impl std::fmt::Debug for BatchProgress {
 
 #[allow(dead_code)]
 struct Progress {
-    last_activity: Duration,
     total: Option<BatchProgress>,
     batch: Option<BatchProgress>,
 }
@@ -94,69 +74,76 @@ impl std::fmt::Debug for Progress {
             (Some(total), Some(batch)) => {
                 f.write_fmt(format_args!("B({:?}) T({:?})", batch, total))
             }
-            (None, None) => f.write_fmt(format_args!("Activity={:?}", &self.last_activity)),
+            (None, None) => f.write_str("Idle"),
             (_, _) => todo!("Nonsensical progress!"),
         }
     }
 }
 
-impl DeviceState {}
-
 #[derive(Debug)]
 struct ConnectedDevice {
+    device_id: DeviceId,
+    addr: SocketAddr,
     batch_size: u64,
-    #[allow(dead_code)]
-    discovered: Discovered,
     state: DeviceState,
-    activity: Instant,
+    received_at: Instant,
     total_records: Option<u64>,
     received: RangeSetBlaze<u64>,
 }
 
 impl ConnectedDevice {
+    fn new(device_id: DeviceId, addr: SocketAddr) -> Self {
+        Self {
+            device_id,
+            addr,
+            batch_size: 10000,
+            state: DeviceState::Discovered,
+            received_at: Instant::now(),
+            total_records: None,
+            received: RangeSetBlaze::new(),
+        }
+    }
+
     fn tick(&mut self) -> Option<Message> {
         match &self.state {
             DeviceState::Discovered => {
                 self.received.clear();
-                self.touch();
-                self.state = DeviceState::Learning;
+                self.transition(DeviceState::expecting(DeviceState::Learning));
 
                 Some(Message::Query)
             }
-            DeviceState::Expecting((deadline, after)) => {
-                todo!()
-            }
-            DeviceState::Receiving(range) => {
-                if !self.has_range(range) {
-                    return None;
-                }
+            _ => {
+                if self.is_stalled() {
+                    info!(
+                        "{:?} stalled {:?} {:?}",
+                        self.device_id,
+                        self.last_received_at(),
+                        self.received_has_gaps()
+                    );
 
-                if let Some(range) = self.requires() {
-                    info!("{:?} received, requiring {:?}", range, range);
-                    let reply = Message::Require(range.clone());
-                    self.state = DeviceState::Receiving(range);
-                    Some(reply)
+                    self.query_requires()
                 } else {
-                    info!("{:?} received, synced", range);
-                    self.state = DeviceState::Synced;
                     None
                 }
             }
-            _ => None,
         }
     }
 
     fn handle(&mut self, message: &Message) -> Result<Option<Message>> {
+        self.received_at = Instant::now();
+
+        match &self.state {
+            DeviceState::Expecting((_deadline, after)) => {
+                info!("expectation fulfilled");
+                self.transition(*Box::clone(&after)) // TODO into_inner on unstable
+            }
+            _ => {}
+        }
+
         match message {
             Message::Statistics { tail } => {
                 self.total_records = Some(*tail);
-                if let Some(range) = self.requires() {
-                    let reply = Message::Require(range.clone());
-                    self.state = DeviceState::Receiving(range);
-                    Ok(Some(reply))
-                } else {
-                    Ok(None)
-                }
+                Ok(self.query_requires())
             }
             Message::Records {
                 head,
@@ -164,9 +151,9 @@ impl ConnectedDevice {
                 records,
             } => {
                 // Include the received records in our received set.
-                let just_received: Vec<u64> =
+                let just_received: RangeSetBlaze<u64> =
                     (0..records.len()).map(|v| v as u64 + *head).collect();
-                self.received(just_received.into_iter());
+                self.received(just_received);
 
                 info!(
                     "{:?} {:?} {:?}",
@@ -175,10 +162,24 @@ impl ConnectedDevice {
                     &self.received_has_gaps()
                 );
 
-                Ok(self.tick())
+                Ok(None)
             }
-            Message::Batch { flags: _flags } => Ok(self.fill_gaps()),
+            Message::Batch { flags: _flags } => Ok(self.query_requires()),
             _ => Ok(None),
+        }
+    }
+
+    fn query_requires(&mut self) -> Option<Message> {
+        if let Some(range) = self.requires() {
+            self.transition(DeviceState::expecting(DeviceState::Receiving(
+                range.clone(),
+            )));
+            Some(Message::Require(range))
+        } else {
+            if !self.total_records.is_none() {
+                self.transition(DeviceState::Synced);
+            }
+            None
         }
     }
 
@@ -187,40 +188,77 @@ impl ConnectedDevice {
             return None;
         }
 
-        let total = self.total_records.unwrap();
-        match self.received.last() {
-            Some(last) => {
-                let last = last + 1;
-                if last < total {
-                    Some(RecordRange::new(
-                        last,
-                        std::cmp::min(last + self.batch_size, total),
-                    ))
-                } else {
-                    None
-                }
+        fn cap_length(r: RangeInclusive<u64>, len: u64) -> RangeInclusive<u64> {
+            let end = *r.end();
+            let start = *r.start();
+            if end - start > len {
+                start..=(start + len)
+            } else {
+                r
             }
-            _ => Some(RecordRange::new(0, std::cmp::min(self.batch_size, total))),
+        }
+
+        let total_records = self.total_records.unwrap();
+        let total_required = RangeSetBlaze::from_iter([0..=total_records]) - &self.received;
+
+        for range in total_required.into_ranges() {
+            return Some(RecordRange::from_range(cap_length(range, self.batch_size)));
+        }
+
+        None
+    }
+
+    fn transition(&mut self, new: DeviceState) {
+        info!("{:?} -> {:?}", self.state, new);
+        self.state = new;
+    }
+
+    fn received(&mut self, records: RangeSetBlaze<u64>) {
+        let mut appending = records.clone();
+        self.received.append(&mut appending);
+    }
+
+    fn last_received_at(&self) -> Duration {
+        Instant::now() - self.received_at
+    }
+
+    fn is_expired(&self) -> bool {
+        match &self.state {
+            DeviceState::Receiving(_) => {
+                self.last_received_at() > Duration::from_millis(EXPIRED_MILLIS)
+            }
+            _ => false,
         }
     }
 
-    fn has_range(&self, range: &RecordRange) -> bool {
-        let testing = range.into_set();
-        let diff = &testing - &self.received;
-        diff.len() == 0
+    fn is_stalled(&self) -> bool {
+        match &self.state {
+            DeviceState::Expecting(_) => {
+                self.last_received_at() > Duration::from_millis(STALLED_EXPECTING_MILLIS)
+            }
+            DeviceState::Receiving(_) => {
+                self.last_received_at() > Duration::from_millis(STALLED_RECEIVING_MILLIS)
+            }
+            _ => false,
+        }
     }
 
-    fn touch(&mut self) {
-        self.activity = Instant::now();
-    }
-
-    fn received<I>(&mut self, records: I)
-    where
-        I: Iterator<Item = u64>,
-    {
-        let mut appending = RangeSetBlaze::from_iter(records);
-        self.received.append(&mut appending);
-        self.touch()
+    fn received_has_gaps(&self) -> HasGaps {
+        match self.received.last() {
+            Some(last) => {
+                let full_range = 0..=last;
+                if last as u128 + 1 == self.received.len() {
+                    HasGaps::Continuous(full_range)
+                } else {
+                    let inverted = RangeSetBlaze::from_iter(full_range.clone()) - &self.received;
+                    let gaps = inverted
+                        .into_ranges()
+                        .collect::<Vec<std::ops::RangeInclusive<_>>>();
+                    HasGaps::HasGaps(full_range, gaps)
+                }
+            }
+            None => HasGaps::Continuous(0..=0),
+        }
     }
 
     fn completed(&self) -> Option<BatchProgress> {
@@ -266,73 +304,9 @@ impl ConnectedDevice {
     fn progress(&self) -> Option<Progress> {
         match &self.state {
             DeviceState::Receiving(_range) => Some(Progress {
-                last_activity: self.last_activity(),
                 total: self.completed(),
                 batch: self.batch(),
             }),
-            _ => None,
-        }
-    }
-
-    fn last_activity(&self) -> Duration {
-        Instant::now() - self.activity
-    }
-
-    fn is_expired(&self) -> bool {
-        match &self.state {
-            DeviceState::Receiving(_) => self.last_activity() > Duration::from_secs(EXPIRE_SECONDS),
-            _ => false,
-        }
-    }
-
-    fn is_stalled(&self) -> bool {
-        match &self.state {
-            DeviceState::Receiving(_) => self.last_activity() > Duration::from_secs(STALL_SECONDS),
-            _ => false,
-        }
-    }
-
-    fn received_has_gaps(&self) -> HasGaps {
-        match self.received.last() {
-            Some(last) => {
-                if last as u128 + 1 == self.received.len() {
-                    HasGaps::Continuous((0, last))
-                } else {
-                    let inverted = RangeSetBlaze::from_iter([0..=last]) - &self.received;
-                    let gaps = inverted
-                        .into_ranges()
-                        .collect::<Vec<std::ops::RangeInclusive<_>>>();
-                    HasGaps::HasGaps(gaps)
-                }
-            }
-            None => HasGaps::Continuous((0, 0)),
-        }
-    }
-
-    fn fill_gaps(&mut self) -> Option<Message> {
-        match self.received_has_gaps() {
-            HasGaps::Continuous(_) => None,
-            HasGaps::HasGaps(gaps) => {
-                info!("fill-gaps!");
-                Some(Message::Require(gaps.get(0).unwrap().into()))
-            }
-        }
-    }
-
-    fn recover(&mut self) -> Option<Message> {
-        info!("recover!");
-
-        match self.received_has_gaps() {
-            HasGaps::Continuous(_) => self.retry(),
-            HasGaps::HasGaps(_) => self.fill_gaps(),
-        }
-    }
-
-    fn retry(&mut self) -> Option<Message> {
-        info!("retry!");
-
-        match &self.state {
-            DeviceState::Receiving(range) => Some(Message::Require(range.clone())),
             _ => None,
         }
     }
@@ -340,8 +314,8 @@ impl ConnectedDevice {
 
 #[derive(Debug)]
 enum HasGaps {
-    Continuous((u64, u64)),
-    HasGaps(Vec<RangeInclusive<u64>>),
+    Continuous(RangeInclusive<u64>),
+    HasGaps(RangeInclusive<u64>, Vec<RangeInclusive<u64>>),
 }
 
 #[derive(Debug)]
@@ -367,7 +341,6 @@ impl Default for Server {
 
 impl Server {
     pub async fn run(&self) -> Result<()> {
-        const IP_ALL: [u8; 4] = [0, 0, 0, 0];
         let listening_addr = SocketAddrV4::new(IP_ALL.into(), self.port);
         let receiving = Arc::new(self.bind(&listening_addr)?);
         let sending = receiving.clone();
@@ -385,16 +358,9 @@ impl Server {
                 while let Some(cmd) = rx.recv().await {
                     match &cmd {
                         ServerCommand::Discovered(discovered) => {
-                            debug!("{:?}", cmd);
-
                             let entry = devices.entry(discovered.device_id.clone());
-                            let entry = entry.or_insert_with(|| ConnectedDevice {
-                                batch_size: 10000,
-                                discovered: discovered.clone(),
-                                state: DeviceState::Discovered,
-                                activity: Instant::now(),
-                                total_records: None,
-                                received: RangeSetBlaze::new(),
+                            let entry = entry.or_insert_with(|| {
+                                ConnectedDevice::new(discovered.device_id.clone(), discovered.addr)
                             });
 
                             device_id_by_addr
@@ -432,30 +398,20 @@ impl Server {
                                 .iter()
                                 .filter(|(_, connected)| connected.is_expired())
                                 .map(|(device_id, connected)| {
-                                    (device_id.clone(), connected.discovered.addr.clone())
+                                    (device_id.clone(), connected.addr.clone())
                                 })
                                 .collect::<Vec<_>>()
                             {
+                                info!("{:?}@{:?} expired", device_id, addr);
                                 device_id_by_addr.remove(&addr);
                                 devices.remove(&device_id);
                             }
 
-                            for (device_id, connected) in devices.iter_mut() {
-                                if connected.is_stalled() {
-                                    let last_activity = connected.last_activity();
-                                    info!(
-                                        "{:?} stalled {:?} {:?}",
-                                        device_id,
-                                        &last_activity,
-                                        &connected.received_has_gaps()
-                                    );
-
-                                    if let Some(reply) = connected.recover() {
-                                        let addr = &connected.discovered.addr;
-                                        transmit(&sending, addr, &reply)
-                                            .await
-                                            .expect("send failed");
-                                    }
+                            for (_, connected) in devices.iter_mut() {
+                                if let Some(message) = connected.tick() {
+                                    transmit(&sending, &connected.addr, &message)
+                                        .await
+                                        .expect("send failed");
                                 }
                             }
                         }
@@ -488,10 +444,11 @@ impl Server {
         });
 
         let timer = tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_millis(1000));
+            let mut interval = time::interval(Duration::from_millis(250));
 
             loop {
                 interval.tick().await;
+
                 tx.send(ServerCommand::Tick)
                     .await
                     .expect("send self failed");
@@ -499,18 +456,9 @@ impl Server {
         });
 
         tokio::select! {
-            _ = pump => {
-                println!("server pump done");
-                Ok(())
-            },
-            _ = receive => {
-                println!("receive pump done");
-                Ok(())
-            },
-            _ = timer => {
-                println!("timer done");
-                Ok(())
-            }
+            _ = pump => Ok(()),
+            _ = receive => Ok(()),
+            _ = timer => Ok(())
         }
     }
 
@@ -605,12 +553,12 @@ impl Discovery {
     }
 }
 
-fn get_rust_log() -> String {
-    std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
+    fn get_rust_log() -> String {
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
+    }
+
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(get_rust_log()))
         .with(tracing_subscriber::fmt::layer())
@@ -644,6 +592,37 @@ async fn main() -> Result<()> {
             return res.map_err(|e| e.into())
         },
     })
+}
+
+#[derive(Clone, PartialEq, Debug)]
+struct RecordRange(RangeInclusive<u64>);
+
+impl RecordRange {
+    fn new(h: u64, t: u64) -> Self {
+        Self(RangeInclusive::new(h, t))
+    }
+
+    fn from_range(range: RangeInclusive<u64>) -> Self {
+        Self(range)
+    }
+
+    fn head(&self) -> u64 {
+        *self.0.start()
+    }
+
+    fn tail(&self) -> u64 {
+        *self.0.end()
+    }
+
+    fn into_set(&self) -> RangeSetBlaze<u64> {
+        RangeSetBlaze::from_iter([self.head()..=self.tail() - 1])
+    }
+}
+
+impl From<&RangeInclusive<u64>> for RecordRange {
+    fn from(value: &RangeInclusive<u64>) -> Self {
+        RecordRange(value.clone())
+    }
 }
 
 struct RawRecord(Vec<u8>);
@@ -765,7 +744,7 @@ impl Message {
                 flags: _flags,
                 records: _records,
             } => trace!("{:?}", self),
-            _ => debug!("{:?}", self),
+            _ => info!("{:?}", self),
         }
     }
 }
@@ -799,5 +778,64 @@ impl Announce {
             Announce::Hello(id) => id,
             Announce::Bye(id) => id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_device() -> ConnectedDevice {
+        ConnectedDevice::new(
+            DeviceId("test-device".to_owned()),
+            SocketAddrV4::new(IP_ALL.into(), 22144).into(),
+        )
+    }
+
+    #[test]
+    pub fn test_unknown_total_records() {
+        let connected = test_device();
+        assert_eq!(connected.requires(), None);
+    }
+
+    #[test]
+    pub fn test_requires_when_none_received() {
+        let mut connected = test_device();
+        connected.total_records = Some(100_000);
+        assert_eq!(connected.requires(), Some(RecordRange(0..=10_000)));
+    }
+
+    #[test]
+    pub fn test_requires_when_some_received() {
+        let mut connected = test_device();
+        connected.total_records = Some(100_000);
+        connected.received(RangeSetBlaze::from_iter([0..=1000]));
+        assert_eq!(connected.requires(), Some(RecordRange(1001..=11_001)));
+    }
+
+    #[test]
+    pub fn test_requires_with_gap() {
+        let mut connected = test_device();
+        connected.total_records = Some(100_000);
+        connected.received(RangeSetBlaze::from_iter([0..=1000]));
+        connected.received(RangeSetBlaze::from_iter([3000..=4000]));
+        assert_eq!(connected.requires(), Some(RecordRange(1001..=2999)));
+    }
+
+    #[test]
+    pub fn test_requires_with_gap_wider_than_batch_size() {
+        let mut connected = test_device();
+        connected.total_records = Some(100_000);
+        connected.received(RangeSetBlaze::from_iter([0..=1000]));
+        connected.received(RangeSetBlaze::from_iter([30_000..=40_000]));
+        assert_eq!(connected.requires(), Some(RecordRange(1001..=11_001)));
+    }
+
+    #[test]
+    pub fn test_requires_when_have_everything() {
+        let mut connected = test_device();
+        connected.total_records = Some(100_000);
+        connected.received(RangeSetBlaze::from_iter([0..=100_000]));
+        assert_eq!(connected.requires(), None);
     }
 }
