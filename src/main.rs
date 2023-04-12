@@ -19,6 +19,7 @@ use tracing::*;
 use tracing_subscriber::prelude::*;
 
 const STALL_SECONDS: u64 = 5;
+const EXPIRE_SECONDS: u64 = 120;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct DeviceId(String);
@@ -277,6 +278,13 @@ impl ConnectedDevice {
         Instant::now() - self.activity
     }
 
+    fn is_expired(&self) -> bool {
+        match &self.state {
+            DeviceState::Receiving(_) => self.last_activity() > Duration::from_secs(EXPIRE_SECONDS),
+            _ => false,
+        }
+    }
+
     fn is_stalled(&self) -> bool {
         match &self.state {
             DeviceState::Receiving(_) => self.last_activity() > Duration::from_secs(STALL_SECONDS),
@@ -420,6 +428,18 @@ impl Server {
                             };
                         }
                         ServerCommand::Tick => {
+                            for (device_id, addr) in devices
+                                .iter()
+                                .filter(|(_, connected)| connected.is_expired())
+                                .map(|(device_id, connected)| {
+                                    (device_id.clone(), connected.discovered.addr.clone())
+                                })
+                                .collect::<Vec<_>>()
+                            {
+                                device_id_by_addr.remove(&addr);
+                                devices.remove(&device_id);
+                            }
+
                             for (device_id, connected) in devices.iter_mut() {
                                 if connected.is_stalled() {
                                     let last_activity = connected.last_activity();
