@@ -201,6 +201,7 @@ impl ConnectedDevice {
 
                 Ok(self.tick())
             }
+            Message::Batch { flags: _flags } => Ok(self.recover()),
             _ => Ok(None),
         }
     }
@@ -650,12 +651,16 @@ enum Message {
         flags: u32,
         records: Vec<RawRecord>,
     },
+    Batch {
+        flags: u32,
+    },
 }
 
 const FK_UDP_PROTOCOL_KIND_QUERY: u32 = 0;
 const FK_UDP_PROTOCOL_KIND_STATISTICS: u32 = 1;
 const FK_UDP_PROTOCOL_KIND_REQUIRE: u32 = 2;
 const FK_UDP_PROTOCOL_KIND_RECORDS: u32 = 3;
+const FK_UDP_PROTOCOL_KIND_BATCH: u32 = 4;
 
 impl Message {
     fn read(bytes: &[u8]) -> Result<Self> {
@@ -689,6 +694,11 @@ impl Message {
                     flags,
                     records,
                 })
+            }
+            FK_UDP_PROTOCOL_KIND_BATCH => {
+                let flags = reader.read_fixed32(bytes)?;
+
+                Ok(Self::Batch { flags })
             }
             _ => todo!(),
         }
@@ -724,6 +734,10 @@ impl Message {
                 writer.write_fixed32(*head as u32)?;
                 writer.write_fixed32(*flags as u32)?;
                 assert!(records.len() == 0); // Laziness
+                Ok(())
+            }
+            Message::Batch { flags } => {
+                writer.write_fixed32(*flags as u32)?;
                 Ok(())
             }
         }
