@@ -18,6 +18,8 @@ use tokio::{
 use tracing::*;
 use tracing_subscriber::prelude::*;
 
+const STALL_SECONDS: u64 = 5;
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct DeviceId(String);
 
@@ -27,45 +29,8 @@ pub struct Discovered {
     addr: SocketAddr,
 }
 
-enum Announce {
-    Hello(DeviceId),
-    Bye(DeviceId),
-}
-impl Announce {
-    fn device_id(&self) -> &DeviceId {
-        match self {
-            Announce::Hello(id) => id,
-            Announce::Bye(id) => id,
-        }
-    }
-}
-
-fn parse_announce(bytes: &[u8]) -> Result<Announce> {
-    use quick_protobuf::BytesReader;
-
-    let mut reader = BytesReader::from_bytes(bytes);
-    let size = reader.read_varint32(bytes)?;
-    let tag = reader.next_tag(bytes)?;
-    assert_eq!(tag >> 3, 1);
-    let id_bytes = reader.read_bytes(bytes)?;
-    assert_eq!(id_bytes.len(), 16);
-    let device_id = DeviceId(hex::encode(id_bytes));
-
-    if size == 18 {
-        Ok(Announce::Hello(device_id))
-    } else {
-        Ok(Announce::Bye(device_id))
-    }
-}
-
 #[derive(Debug, Clone)]
 struct RecordRange((u64, u64));
-
-impl From<&RangeInclusive<u64>> for RecordRange {
-    fn from(value: &RangeInclusive<u64>) -> Self {
-        RecordRange((*value.start(), *value.end() + 1))
-    }
-}
 
 impl RecordRange {
     fn new(h: u64, t: u64) -> Self {
@@ -85,11 +50,18 @@ impl RecordRange {
     }
 }
 
+impl From<&RangeInclusive<u64>> for RecordRange {
+    fn from(value: &RangeInclusive<u64>) -> Self {
+        RecordRange((*value.start(), *value.end() + 1))
+    }
+}
+
 #[derive(Debug)]
 enum DeviceState {
     Discovered,
     Learning,
     Receiving(RecordRange),
+    Expecting((Instant, Box<DeviceState>)),
     Synced,
 }
 
@@ -102,7 +74,7 @@ struct BatchProgress {
 impl std::fmt::Debug for BatchProgress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
-            "{:.2}% ({}/{})",
+            "{:.2} ({}/{})",
             self.completed, self.received, self.total
         ))
     }
@@ -149,6 +121,9 @@ impl ConnectedDevice {
                 self.state = DeviceState::Learning;
 
                 Some(Message::Query)
+            }
+            DeviceState::Expecting((deadline, after)) => {
+                todo!()
             }
             DeviceState::Receiving(range) => {
                 if !self.has_range(range) {
@@ -201,7 +176,7 @@ impl ConnectedDevice {
 
                 Ok(self.tick())
             }
-            Message::Batch { flags: _flags } => Ok(self.recover()),
+            Message::Batch { flags: _flags } => Ok(self.fill_gaps()),
             _ => Ok(None),
         }
     }
@@ -304,7 +279,7 @@ impl ConnectedDevice {
 
     fn is_stalled(&self) -> bool {
         match &self.state {
-            DeviceState::Receiving(_) => self.last_activity() > Duration::from_secs(20),
+            DeviceState::Receiving(_) => self.last_activity() > Duration::from_secs(STALL_SECONDS),
             _ => false,
         }
     }
@@ -326,10 +301,31 @@ impl ConnectedDevice {
         }
     }
 
-    fn recover(&mut self) -> Option<Message> {
+    fn fill_gaps(&mut self) -> Option<Message> {
         match self.received_has_gaps() {
             HasGaps::Continuous(_) => None,
-            HasGaps::HasGaps(gaps) => Some(Message::Require(gaps.get(0).unwrap().into())),
+            HasGaps::HasGaps(gaps) => {
+                info!("fill-gaps!");
+                Some(Message::Require(gaps.get(0).unwrap().into()))
+            }
+        }
+    }
+
+    fn recover(&mut self) -> Option<Message> {
+        info!("recover!");
+
+        match self.received_has_gaps() {
+            HasGaps::Continuous(_) => self.retry(),
+            HasGaps::HasGaps(_) => self.fill_gaps(),
+        }
+    }
+
+    fn retry(&mut self) -> Option<Message> {
+        info!("retry!");
+
+        match &self.state {
+            DeviceState::Receiving(range) => Some(Message::Require(range.clone())),
+            _ => None,
         }
     }
 }
@@ -385,7 +381,7 @@ impl Server {
 
                             let entry = devices.entry(discovered.device_id.clone());
                             let entry = entry.or_insert_with(|| ConnectedDevice {
-                                batch_size: 1000,
+                                batch_size: 10000,
                                 discovered: discovered.clone(),
                                 state: DeviceState::Discovered,
                                 activity: Instant::now(),
@@ -424,7 +420,6 @@ impl Server {
                             };
                         }
                         ServerCommand::Tick => {
-                            // TODO Cheeck for stalled Receiving states.
                             for (device_id, connected) in devices.iter_mut() {
                                 if connected.is_stalled() {
                                     let last_activity = connected.last_activity();
@@ -553,7 +548,7 @@ impl Discovery {
             trace!("{} bytes from {}", len, addr);
 
             let bytes = &buffer[0..len];
-            let announced = parse_announce(bytes)?;
+            let announced = Announce::parse(bytes)?;
             let discovered = Discovered {
                 device_id: announced.device_id().clone(),
                 addr: {
@@ -751,6 +746,38 @@ impl Message {
                 records: _records,
             } => trace!("{:?}", self),
             _ => debug!("{:?}", self),
+        }
+    }
+}
+
+enum Announce {
+    Hello(DeviceId),
+    Bye(DeviceId),
+}
+
+impl Announce {
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        use quick_protobuf::BytesReader;
+
+        let mut reader = BytesReader::from_bytes(bytes);
+        let size = reader.read_varint32(bytes)?;
+        let tag = reader.next_tag(bytes)?;
+        assert_eq!(tag >> 3, 1);
+        let id_bytes = reader.read_bytes(bytes)?;
+        assert_eq!(id_bytes.len(), 16);
+        let device_id = DeviceId(hex::encode(id_bytes));
+
+        if size == 18 {
+            Ok(Announce::Hello(device_id))
+        } else {
+            Ok(Announce::Bye(device_id))
+        }
+    }
+
+    fn device_id(&self) -> &DeviceId {
+        match self {
+            Announce::Hello(id) => id,
+            Announce::Bye(id) => id,
         }
     }
 }
