@@ -217,14 +217,34 @@ impl ConnectedDevice {
             }
         }
 
+        fn try_merge(
+            first: Option<RangeInclusive<u64>>,
+            second: RangeInclusive<u64>,
+            len: u64,
+        ) -> Option<RangeInclusive<u64>> {
+            match &first {
+                Some(first) => {
+                    let combined = *first.start()..=*second.end();
+                    let width = combined.end() - combined.start();
+                    if width > len {
+                        Some(first.clone())
+                    } else {
+                        Some(combined)
+                    }
+                }
+                None => Some(second),
+            }
+        }
+
         let total_records = self.total_records.unwrap();
         let total_required = RangeSetBlaze::from_iter([0..=total_records]) - &self.received;
 
+        let mut requiring: Option<RangeInclusive<u64>> = None;
         for range in total_required.into_ranges() {
-            return Some(RecordRange::from_range(cap_length(range, self.batch_size)));
+            requiring = try_merge(requiring, cap_length(range, self.batch_size), 500);
         }
 
-        None
+        requiring.map(RecordRange)
     }
 
     fn transition(&mut self, new: DeviceState) {
@@ -624,10 +644,6 @@ impl RecordRange {
         Self(RangeInclusive::new(h, t))
     }
 
-    fn from_range(range: RangeInclusive<u64>) -> Self {
-        Self(range)
-    }
-
     fn head(&self) -> u64 {
         *self.0.start()
     }
@@ -849,6 +865,17 @@ mod tests {
         connected.received(RangeSetBlaze::from_iter([0..=1000]));
         connected.received(RangeSetBlaze::from_iter([3000..=4000]));
         assert_eq!(connected.requires(), Some(RecordRange(1001..=2999)));
+    }
+
+    #[test]
+    pub fn test_requires_duplicates_when_gaps_are_clumped() {
+        let mut connected = test_device();
+        connected.total_records = Some(100_000);
+        connected.received(RangeSetBlaze::from_iter([0..=1000]));
+        connected.received(RangeSetBlaze::from_iter([1010..=1020]));
+        connected.received(RangeSetBlaze::from_iter([1080..=1099]));
+        connected.received(RangeSetBlaze::from_iter([1180..=2000]));
+        assert_eq!(connected.requires(), Some(RecordRange(1001..=1179)));
     }
 
     #[test]
