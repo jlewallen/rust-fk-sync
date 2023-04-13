@@ -93,6 +93,7 @@ struct ConnectedDevice {
     received: RangeSetBlaze<u64>,
     backoff: ExponentialBackoff,
     waiting_until: Option<Instant>,
+    syncing_started: Option<Instant>,
 }
 
 impl ConnectedDevice {
@@ -107,6 +108,7 @@ impl ConnectedDevice {
             received: RangeSetBlaze::new(),
             backoff: Self::stall_backoff(),
             waiting_until: None,
+            syncing_started: None,
         }
     }
 
@@ -164,6 +166,7 @@ impl ConnectedDevice {
         match message {
             Message::Statistics { tail } => {
                 self.total_records = Some(*tail);
+                self.syncing_started = Some(Instant::now());
                 Ok(self.query_requires())
             }
             Message::Records {
@@ -197,6 +200,8 @@ impl ConnectedDevice {
         } else {
             if !self.total_records.is_none() {
                 self.transition(DeviceState::Synced);
+                let elapsed = Instant::now() - self.syncing_started.unwrap();
+                info!("syncing took {:?}", elapsed);
             }
             None
         }
