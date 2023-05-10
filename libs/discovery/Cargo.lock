@@ -133,25 +133,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a2dd5a6fe8c6e3502f568a6353e5273bbb15193ad9a89e457b9970798efbea1"
 
 [[package]]
-name = "cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "backoff",
- "clap",
- "discovery",
- "hex",
- "lazy_static",
- "quick-protobuf",
- "range-set-blaze",
- "socket2",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "varint",
-]
-
-[[package]]
 name = "concolor-override"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -164,24 +145,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88d11d52c3d7ca2e6d0040212be9e4dbbcd78b6447f535b6b561f449427944cf"
 dependencies = [
  "windows-sys",
-]
-
-[[package]]
-name = "discovery"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "backoff",
- "clap",
- "hex",
- "lazy_static",
- "quick-protobuf",
- "range-set-blaze",
- "socket2",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "varint",
 ]
 
 [[package]]
@@ -543,6 +506,24 @@ name = "regex-syntax"
 version = "0.6.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f162c6dd7b008981e4d40210aca20b4bd0f9b60ca9271061b07f78537722f2e1"
+
+[[package]]
+name = "rust-discovery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "backoff",
+ "clap",
+ "hex",
+ "lazy_static",
+ "quick-protobuf",
+ "range-set-blaze",
+ "socket2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "varint",
+]
 
 [[package]]
 name = "rustix"

@@ -10,14 +10,12 @@ use std::{
 };
 use tokio::{
     net::{ToSocketAddrs, UdpSocket},
-    signal,
     sync::mpsc,
     sync::mpsc::Sender,
     sync::Mutex,
     time::{self, Instant},
 };
 use tracing::*;
-use tracing_subscriber::prelude::*;
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 const STALLED_EXPECTING_MILLIS: u64 = 5000;
@@ -34,7 +32,7 @@ pub struct Discovered {
 }
 
 #[derive(Clone, Debug)]
-enum DeviceState {
+pub enum DeviceState {
     Discovered,
     Learning,
     Receiving(RecordRange),
@@ -65,7 +63,7 @@ impl std::fmt::Debug for RangeProgress {
 }
 
 #[allow(dead_code)]
-struct Progress {
+pub struct Progress {
     total: Option<RangeProgress>,
     batch: Option<RangeProgress>,
 }
@@ -83,7 +81,7 @@ impl std::fmt::Debug for Progress {
 }
 
 #[derive(Debug)]
-struct ConnectedDevice {
+pub struct ConnectedDevice {
     device_id: DeviceId,
     addr: SocketAddr,
     batch_size: u64,
@@ -372,13 +370,13 @@ enum HasGaps {
 }
 
 #[derive(Debug)]
-enum ServerCommand {
+pub enum ServerCommand {
     Discovered(Discovered),
     Received(SocketAddr, Message),
     Tick,
 }
 
-struct Server {
+pub struct Server {
     port: u16,
     sender: Arc<Mutex<Option<Sender<ServerCommand>>>>,
 }
@@ -515,7 +513,7 @@ impl Server {
         }
     }
 
-    async fn sync(&self, discovered: Discovered) -> Result<()> {
+    pub async fn sync(&self, discovered: Discovered) -> Result<()> {
         self.send(ServerCommand::Discovered(discovered)).await
     }
 
@@ -553,7 +551,7 @@ where
 }
 
 #[derive(Default)]
-struct Discovery {}
+pub struct Discovery {}
 
 impl Discovery {
     pub async fn run(&self, publisher: Sender<Discovered>) -> Result<()> {
@@ -606,43 +604,8 @@ impl Discovery {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    fn get_rust_log() -> String {
-        std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
-    }
-
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(get_rust_log()))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    let server = Arc::new(Server::default());
-    let discovery = Discovery::default();
-    let (tx, mut rx) = mpsc::channel::<Discovered>(32);
-
-    let pump = tokio::spawn({
-        let server = server.clone();
-        async move {
-            while let Some(d) = rx.recv().await {
-                info!("{:?}", d);
-                server.sync(d).await.expect("error initiating sync");
-            }
-        }
-    });
-
-    Ok(tokio::select! {
-        _ = discovery.run(tx) => {},
-        _ = server.run() => {},
-        _ = pump => {},
-        res = signal::ctrl_c() => {
-            return res.map_err(|e| e.into())
-        },
-    })
-}
-
 #[derive(Clone, PartialEq, Debug)]
-struct RecordRange(RangeInclusive<u64>);
+pub struct RecordRange(RangeInclusive<u64>);
 
 impl RecordRange {
     fn new(h: u64, t: u64) -> Self {
@@ -674,7 +637,7 @@ impl From<&RangeInclusive<u64>> for RecordRange {
     }
 }
 
-struct RawRecord(Vec<u8>);
+pub struct RawRecord(Vec<u8>);
 
 impl std::fmt::Debug for RawRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -683,7 +646,7 @@ impl std::fmt::Debug for RawRecord {
 }
 
 #[derive(Debug)]
-enum Message {
+pub enum Message {
     Query,
     Statistics {
         tail: u64,
@@ -799,7 +762,7 @@ impl Message {
     }
 }
 
-enum Announce {
+pub enum Announce {
     Hello(DeviceId),
     Bye(DeviceId),
 }
