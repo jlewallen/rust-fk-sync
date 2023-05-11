@@ -3,6 +3,7 @@ members = [
     "libs/query",
     "libs/discovery",
     "libs/store",
+    "libs/sync",
     "cli"
 ]
 default-members = [ "cli" ]

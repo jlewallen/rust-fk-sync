@@ -1,25 +1,20 @@
 [package]
-name = "cli"
+name = "sync"
 version = "0.1.0"
-authors = [ "Jacob Lewallen <jlewallen@gmail.com>" ]
 edition = "2021"
+
+[dependencies.discovery]
+path = "../discovery"
 
 [dependencies]
 anyhow = "1.0.66"
 backoff = { version = "0.4.0", features = ["tokio"] }
-clap = "4.2.1"
 hex = "0.4.3"
 lazy_static = "1.4.0"
 quick-protobuf = "0.8.1"
 range-set-blaze = "0.1.2"
 socket2 = "0.4.7"
+thiserror = "1.0.40"
 tokio = { version = "1.27.0", features = ["full"] }
 tracing = "0.1.37"
-tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 varint = "0.9.0"
-
-[dependencies.discovery]
-path = "../libs/discovery"
-
-[dependencies.sync]
-path = "../libs/sync"

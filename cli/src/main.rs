@@ -1,9 +1,11 @@
 use anyhow::Result;
-use discovery::{Discovered, Discovery, Server};
 use std::sync::Arc;
 use tokio::{signal, sync::mpsc};
 use tracing::*;
 use tracing_subscriber::prelude::*;
+
+use discovery::{Discovered, Discovery};
+use sync::Server;
 
 #[tokio::main]
 async fn main() -> Result<()> {
