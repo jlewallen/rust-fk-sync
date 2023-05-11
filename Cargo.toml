@@ -1,6 +1,8 @@
 [workspace]
 members = [
+    "libs/query",
     "libs/discovery",
+    "libs/store",
     "cli"
 ]
 default-members = [ "cli" ]

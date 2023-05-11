@@ -450,6 +450,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "query"
+version = "0.1.0"
+
+[[package]]
 name = "quick-protobuf"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -597,6 +601,10 @@ dependencies = [
  "libc",
  "winapi",
 ]
+
+[[package]]
+name = "store"
+version = "0.1.0"
 
 [[package]]
 name = "strsim"
