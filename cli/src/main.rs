@@ -10,13 +10,29 @@ use sync::Server;
 #[tokio::main]
 async fn main() -> Result<()> {
     fn get_rust_log() -> String {
-        std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())
+        let mut original = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
+
+        if !original.contains("hyper=") {
+            original.push_str(",hyper=info");
+        }
+
+        if !original.contains("reqwest=") {
+            original.push_str(",reqwest=info");
+        }
+
+        original
     }
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(get_rust_log()))
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    /*
+    const TEST_IP: [u8; 4] = [192, 168, 0, 205];
+    let client = query::Client::new()?;
+    let _status = client.query_status(TEST_IP.into()).await?;
+    */
 
     let server = Arc::new(Server::default());
     let discovery = Discovery::default();

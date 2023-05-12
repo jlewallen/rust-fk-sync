@@ -2,24 +2,60 @@
 use anyhow::Result;
 #[allow(unused_imports)]
 use prost::Message;
+use reqwest::header::HeaderMap;
 #[allow(unused_imports)]
 use std::io::Cursor;
-
-pub struct Client {}
-
-impl Client {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
+use std::{net::Ipv4Addr, time::Duration};
+use tracing::*;
 
 pub mod http {
     include!(concat!(env!("OUT_DIR"), "/fk_app.rs"));
 }
 
+pub use http::*;
+
+pub struct Client {
+    client: reqwest::Client,
+}
+
+impl Client {
+    pub fn new() -> Result<Self> {
+        let mut headers = HeaderMap::new();
+        let sdk_version = std::env!("CARGO_PKG_VERSION");
+        let user_agent = format!("rustfk ({})", sdk_version);
+        headers.insert("user-agent", user_agent.parse()?);
+
+        let client = reqwest::ClientBuilder::new()
+            .user_agent("rustfk")
+            .timeout(Duration::from_secs(10))
+            .default_headers(headers)
+            .build()?;
+
+        Ok(Self { client })
+    }
+
+    pub async fn query_status(&self, addr: Ipv4Addr) -> Result<HttpReply> {
+        let url = format!("http://{}/fk/v1", addr);
+        debug!("querying {}", &url);
+
+        let req = self
+            .client
+            .get(url)
+            .timeout(Duration::from_secs(10))
+            .build()?;
+
+        let response = self.client.execute(req).await?;
+        let bytes = response.bytes().await?;
+
+        debug!("queried, got {} bytes", bytes.len());
+        let data = HttpReply::decode_length_delimited(bytes)?;
+
+        Ok(data)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::http::*;
     use super::*;
 
     #[test]
