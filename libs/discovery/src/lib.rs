@@ -23,8 +23,6 @@ impl Discovery {
         let addr = SocketAddrV4::new(Ipv4Addr::new(224, 1, 2, 3), 22143);
         let receiving = Arc::new(self.bind(&addr)?);
 
-        info!("discovering on {}", addr);
-
         let mut buffer = vec![0u8; 4096];
 
         loop {
@@ -55,8 +53,15 @@ impl Discovery {
 
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
-        // Unnecessary for our use case, though good to know it's around.
-        // socket.set_reuse_address(true)?;
+        info!("discovering on {}", addr);
+
+        // This don't seem to be necessary when running a rust program from the
+        // command line on Linux. If you omit them, then running a flutter
+        // application that uses this library will fail to bind with an error
+        // about the address being in use.
+        socket.set_reuse_address(true)?;
+
+        // Saving just in case this becomes a factor later, as the above did.
         // socket.set_multicast_loop_v4(true)?;
 
         // This is very important when using UdpSocket::from_std, otherwise
