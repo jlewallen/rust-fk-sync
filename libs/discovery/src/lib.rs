@@ -84,14 +84,13 @@ impl Announce {
         use quick_protobuf::BytesReader;
 
         let mut reader = BytesReader::from_bytes(bytes);
-        let size = reader.read_varint32(bytes)?;
+        let _size = reader.read_varint32(bytes)?;
         let tag = reader.next_tag(bytes)?;
         assert_eq!(tag >> 3, 1);
         let id_bytes = reader.read_bytes(bytes)?;
-        assert_eq!(id_bytes.len(), 16);
         let device_id = DeviceId(hex::encode(id_bytes));
 
-        if size == 18 {
+        if reader.is_eof() {
             Ok(Announce::Hello(device_id))
         } else {
             Ok(Announce::Bye(device_id))
