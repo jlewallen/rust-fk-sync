@@ -190,6 +190,7 @@ dependencies = [
  "discovery",
  "hex",
  "lazy_static",
+ "query",
  "quick-protobuf",
  "range-set-blaze",
  "socket2",
@@ -1241,6 +1242,7 @@ name = "store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "query",
  "rusqlite",
  "rusqlite_migration",
  "thiserror",
