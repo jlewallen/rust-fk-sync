@@ -403,15 +403,18 @@ impl Server {
                         ServerCommand::Discovered(discovered) => {
                             let entry = devices.entry(discovered.device_id.clone());
                             let entry = entry.or_insert_with(|| {
-                                ConnectedDevice::new(discovered.device_id.clone(), discovered.addr)
+                                ConnectedDevice::new(
+                                    discovered.device_id.clone(),
+                                    discovered.udp_addr,
+                                )
                             });
 
                             device_id_by_addr
-                                .entry(discovered.addr)
+                                .entry(discovered.udp_addr)
                                 .or_insert(discovered.device_id.clone());
 
                             if let Some(message) = entry.tick() {
-                                transmit(&sending, &discovered.addr, &message)
+                                transmit(&sending, &discovered.udp_addr, &message)
                                     .await
                                     .expect("send failed");
                             }

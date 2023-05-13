@@ -12,7 +12,8 @@ pub struct DeviceId(pub String);
 #[derive(Clone, Debug)]
 pub struct Discovered {
     pub device_id: DeviceId,
-    pub addr: SocketAddr,
+    pub http_addr: SocketAddr,
+    pub udp_addr: SocketAddr,
 }
 
 #[derive(Default)]
@@ -33,7 +34,12 @@ impl Discovery {
             let announced = Announce::parse(bytes)?;
             let discovered = Discovered {
                 device_id: announced.device_id().clone(),
-                addr: {
+                http_addr: {
+                    let mut addr = addr;
+                    addr.set_port(announced.port());
+                    addr
+                },
+                udp_addr: {
                     let mut addr = addr;
                     addr.set_port(22144);
                     addr
@@ -75,7 +81,7 @@ impl Discovery {
 }
 
 pub enum Announce {
-    Hello(DeviceId),
+    Hello(DeviceId, u16),
     Bye(DeviceId),
 }
 
@@ -89,9 +95,19 @@ impl Announce {
         assert_eq!(tag >> 3, 1);
         let id_bytes = reader.read_bytes(bytes)?;
         let device_id = DeviceId(hex::encode(id_bytes));
+        let port = if !reader.is_eof() {
+            let tag = reader.next_tag(bytes)?;
+            if tag >> 3 == 4 {
+                reader.read_int32(bytes)?
+            } else {
+                0
+            }
+        } else {
+            0
+        };
 
         if reader.is_eof() {
-            Ok(Announce::Hello(device_id))
+            Ok(Announce::Hello(device_id, port as u16))
         } else {
             Ok(Announce::Bye(device_id))
         }
@@ -99,8 +115,15 @@ impl Announce {
 
     fn device_id(&self) -> &DeviceId {
         match self {
-            Announce::Hello(id) => id,
+            Announce::Hello(id, _) => id,
             Announce::Bye(id) => id,
+        }
+    }
+
+    fn port(&self) -> u16 {
+        match self {
+            Announce::Hello(_, port) => *port,
+            Announce::Bye(_) => todo!(),
         }
     }
 }
