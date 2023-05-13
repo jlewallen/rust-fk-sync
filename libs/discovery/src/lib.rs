@@ -6,6 +6,11 @@ use std::{
 use tokio::{net::UdpSocket, sync::mpsc::Sender};
 use tracing::*;
 
+const MULTICAST_IP: [u8; 4] = [224, 1, 2, 3];
+const MULTICAST_PORT: u16 = 22143;
+const READ_BUFFER_SIZE: usize = 4096;
+const DEFAULT_UDP_SERVER_PORT: u16 = 22144;
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct DeviceId(pub String);
 
@@ -21,10 +26,10 @@ pub struct Discovery {}
 
 impl Discovery {
     pub async fn run(&self, publisher: Sender<Discovered>) -> Result<()> {
-        let addr = SocketAddrV4::new(Ipv4Addr::new(224, 1, 2, 3), 22143);
+        let addr = SocketAddrV4::new(MULTICAST_IP.into(), MULTICAST_PORT);
         let receiving = Arc::new(self.bind(&addr)?);
 
-        let mut buffer = vec![0u8; 4096];
+        let mut buffer = vec![0u8; READ_BUFFER_SIZE];
 
         loop {
             let (len, addr) = receiving.recv_from(&mut buffer[..]).await?;
@@ -41,7 +46,7 @@ impl Discovery {
                 },
                 udp_addr: {
                     let mut addr = addr;
-                    addr.set_port(22144);
+                    addr.set_port(DEFAULT_UDP_SERVER_PORT);
                     addr
                 },
             };
@@ -87,17 +92,19 @@ pub enum Announce {
 
 impl Announce {
     fn parse(bytes: &[u8]) -> Result<Self> {
+        const DEVICE_ID_TAG: u32 = 1;
+        const PORT_TAG: u32 = 4;
         use quick_protobuf::BytesReader;
 
         let mut reader = BytesReader::from_bytes(bytes);
         let _size = reader.read_varint32(bytes)?;
         let tag = reader.next_tag(bytes)?;
-        assert_eq!(tag >> 3, 1);
+        assert_eq!(tag >> 3, DEVICE_ID_TAG);
         let id_bytes = reader.read_bytes(bytes)?;
         let device_id = DeviceId(hex::encode(id_bytes));
         let port = if !reader.is_eof() {
             let tag = reader.next_tag(bytes)?;
-            if tag >> 3 == 4 {
+            if tag >> 3 == PORT_TAG {
                 reader.read_int32(bytes)?
             } else {
                 0
