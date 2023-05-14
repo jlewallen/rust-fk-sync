@@ -25,7 +25,8 @@ pub(crate) fn get_migrations<'m>() -> Migrations<'m> {
             position INTEGER NOT NULL,
             name TEXT NOT NULL,
             path TEXT NOT NULL,
-            configuration BLOB
+            configuration BLOB,
+            removed BOOL NOT NULL
         );
 
         CREATE INDEX module_idx_station_id ON module (station_id);

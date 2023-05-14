@@ -114,8 +114,8 @@ impl Db {
         let mut stmt = conn.prepare(
             r#"
             INSERT INTO module
-            (station_id, hardware_id, manufacturer, kind, version, flags, position, name, path, configuration) VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (station_id, hardware_id, manufacturer, kind, version, flags, position, name, path, configuration, removed) VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )?;
 
@@ -129,7 +129,8 @@ impl Db {
             module.position,
             module.name,
             module.path,
-            module.configuration
+            module.configuration,
+            module.removed,
         ])?;
 
         assert_eq!(affected, 1);
@@ -146,6 +147,7 @@ impl Db {
             name: module.name.clone(),
             path: module.path.clone(),
             sensors: module.sensors.clone(),
+            removed: module.removed,
             configuration: module.configuration.clone(),
         })
     }
@@ -154,7 +156,7 @@ impl Db {
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"
-            UPDATE module SET manufacturer = ?, kind = ?, version = ?, flags = ?, position = ?, name = ?, path = ?, configuration = ? WHERE id = ?
+            UPDATE module SET manufacturer = ?, kind = ?, version = ?, flags = ?, position = ?, name = ?, path = ?, configuration = ?, removed = ? WHERE id = ?
             "#,
         )?;
 
@@ -167,6 +169,7 @@ impl Db {
             module.name,
             module.path,
             module.configuration,
+            module.removed,
             module.id,
         ])?;
 
@@ -177,7 +180,7 @@ impl Db {
 
     pub fn get_modules(&self, station_id: i64) -> Result<Vec<Module>> {
         let mut stmt = self.require_opened()?.prepare(
-            r#"SELECT id, station_id, hardware_id, manufacturer, kind, version, flags, position, name, path, configuration
+            r#"SELECT id, station_id, hardware_id, manufacturer, kind, version, flags, position, name, path, configuration, removed
                FROM module WHERE station_id = ?"#,
         )?;
 
@@ -196,6 +199,7 @@ impl Db {
                 name: row.get(8)?,
                 path: row.get(9)?,
                 configuration: row.get(10)?,
+                removed: row.get(11)?,
                 sensors: Vec::new(),
             })
         })?;

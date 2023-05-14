@@ -57,6 +57,7 @@ fn to_module(mc: &query::ModuleCapabilities) -> Result<Module> {
         name: mc.name.to_owned(),
         path: mc.path.to_owned(),
         configuration,
+        removed: false,
         sensors,
     })
 }

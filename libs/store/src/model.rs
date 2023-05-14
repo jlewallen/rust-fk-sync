@@ -33,6 +33,7 @@ pub struct Module {
     pub name: String,
     pub path: String,
     pub configuration: Option<Vec<u8>>,
+    pub removed: bool,
     pub sensors: Vec<Sensor>,
 }
 
@@ -86,6 +87,7 @@ pub(crate) mod test {
             name: "module-0".to_owned(),
             path: "module-0".to_owned(),
             configuration: None,
+            removed: false,
             sensors: vec![test_sensor(None)],
         }
     }
