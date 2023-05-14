@@ -1,9 +1,6 @@
-#[allow(unused_imports)]
 use anyhow::Result;
-#[allow(unused_imports)]
 use prost::Message;
 use reqwest::header::HeaderMap;
-#[allow(unused_imports)]
 use std::io::Cursor;
 use std::time::Duration;
 use tracing::*;
@@ -52,6 +49,11 @@ impl Client {
 
         Ok(data)
     }
+}
+
+pub fn parse_http_reply(data: &[u8]) -> Result<HttpReply> {
+    let mut cursor = Cursor::new(data);
+    Ok(HttpReply::decode_length_delimited(&mut cursor)?)
 }
 
 #[cfg(test)]
