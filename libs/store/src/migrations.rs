@@ -30,6 +30,7 @@ pub(crate) fn get_migrations<'m>() -> Migrations<'m> {
         );
 
         CREATE INDEX module_idx_station_id ON module (station_id);
+        CREATE INDEX module_idx_hardware_id ON module (hardware_id);
 
         CREATE TABLE sensor (
             id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
