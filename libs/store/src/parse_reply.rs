@@ -20,11 +20,11 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station> {
     Ok(Station {
         id: None,
         device_id,
-        name: identity.name.to_owned(),
         generation_id,
+        name: identity.name.to_owned(),
         last_seen: Utc::now(),
-        modules,
         status: None,
+        modules,
     })
 }
 
@@ -45,6 +45,7 @@ fn to_module(mc: &query::ModuleCapabilities) -> Result<Module> {
 
     Ok(Module {
         id: None,
+        station_id: None,
         hardware_id: hex::encode(&mc.id),
         header: ModuleHeader {
             manufacturer: header.manufacturer,
@@ -55,19 +56,20 @@ fn to_module(mc: &query::ModuleCapabilities) -> Result<Module> {
         position: mc.position,
         name: mc.name.to_owned(),
         path: mc.path.to_owned(),
-        sensors,
         configuration,
+        sensors,
     })
 }
 
 fn to_sensor(sc: &query::SensorCapabilities) -> Result<Sensor> {
     Ok(Sensor {
         id: None,
+        module_id: None,
         number: sc.number,
         flags: sc.flags,
         key: sc.name.to_owned(),
         path: sc.path.to_owned(),
-        uom: sc.unit_of_measure.to_owned(),
+        calibrated_uom: sc.unit_of_measure.to_owned(),
         uncalibrated_uom: sc.uncalibrated_unit_of_measure.to_owned(),
         value: sc.value.as_ref().map(|v| LiveValue {
             value: v.value,
