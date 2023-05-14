@@ -5,7 +5,7 @@ use prost::Message;
 use reqwest::header::HeaderMap;
 #[allow(unused_imports)]
 use std::io::Cursor;
-use std::{net::Ipv4Addr, time::Duration};
+use std::time::Duration;
 use tracing::*;
 
 pub mod http {
@@ -34,7 +34,7 @@ impl Client {
         Ok(Self { client })
     }
 
-    pub async fn query_status(&self, addr: Ipv4Addr) -> Result<HttpReply> {
+    pub async fn query_status(&self, addr: &str) -> Result<HttpReply> {
         let url = format!("http://{}/fk/v1", addr);
         debug!("querying {}", &url);
 

@@ -6,6 +6,7 @@ pub(crate) fn get_migrations<'m>() -> Migrations<'m> {
         CREATE TABLE station (
             id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
             device_id TEXT NOT NULL,
+            generation_id TEXT NOT NULL,
             name TEXT NOT NULL,
             last_seen DATETIME NOT NULL,
             status BLOB

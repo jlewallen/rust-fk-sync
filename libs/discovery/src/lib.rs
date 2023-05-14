@@ -21,6 +21,12 @@ pub struct Discovered {
     pub udp_addr: SocketAddr,
 }
 
+impl Discovered {
+    pub fn http_url(&self) -> String {
+        format!("http://{}/fk/v1", self.http_addr)
+    }
+}
+
 #[derive(Default)]
 pub struct Discovery {}
 
