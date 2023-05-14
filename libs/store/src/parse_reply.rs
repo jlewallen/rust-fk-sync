@@ -1,12 +1,23 @@
 use anyhow::Result;
 use chrono::Utc;
+use thiserror::Error;
 
 use crate::model::*;
 use query::HttpReply;
 
-pub fn http_reply_to_station(reply: HttpReply) -> Result<Station> {
-    let status = reply.status.expect("No status");
-    let identity = status.identity.expect("No identity");
+#[derive(Error, Debug)]
+pub enum ReplyMappingError {
+    #[error("No status")]
+    NoStatus,
+    #[error("No identity")]
+    NoIdentity,
+    #[error("No module header")]
+    NoModuleHeader,
+}
+
+pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingError> {
+    let status = reply.status.ok_or(ReplyMappingError::NoStatus)?;
+    let identity = status.identity.ok_or(ReplyMappingError::NoIdentity)?;
 
     let device_id = DeviceId(hex::encode(identity.device_id));
     let generation_id = hex::encode(identity.generation_id);
@@ -15,7 +26,7 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station> {
         .modules
         .iter()
         .map(|mc| Ok(to_module(mc)?))
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, ReplyMappingError>>()?;
 
     Ok(Station {
         id: None,
@@ -28,14 +39,17 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station> {
     })
 }
 
-fn to_module(mc: &query::ModuleCapabilities) -> Result<Module> {
-    let header = mc.header.as_ref().expect("No module header");
+fn to_module(mc: &query::ModuleCapabilities) -> Result<Module, ReplyMappingError> {
+    let header = mc
+        .header
+        .as_ref()
+        .ok_or(ReplyMappingError::NoModuleHeader)?;
 
     let sensors = mc
         .sensors
         .iter()
         .map(|sc| Ok(to_sensor(sc)?))
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, ReplyMappingError>>()?;
 
     let configuration = if mc.configuration.len() > 0 {
         Some(mc.configuration.clone())
@@ -62,7 +76,7 @@ fn to_module(mc: &query::ModuleCapabilities) -> Result<Module> {
     })
 }
 
-fn to_sensor(sc: &query::SensorCapabilities) -> Result<Sensor> {
+fn to_sensor(sc: &query::SensorCapabilities) -> Result<Sensor, ReplyMappingError> {
     Ok(Sensor {
         id: None,
         module_id: None,
