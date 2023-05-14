@@ -156,11 +156,12 @@ impl Db {
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"
-            UPDATE module SET manufacturer = ?, kind = ?, version = ?, flags = ?, position = ?, name = ?, path = ?, configuration = ?, removed = ? WHERE id = ?
+            UPDATE module SET station_id = ?, manufacturer = ?, kind = ?, version = ?, flags = ?, position = ?, name = ?, path = ?, configuration = ?, removed = ? WHERE id = ?
             "#,
         )?;
 
         let affected = stmt.execute(params![
+            module.station_id,
             module.header.manufacturer,
             module.header.kind,
             module.header.version,
