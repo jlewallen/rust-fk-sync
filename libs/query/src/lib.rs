@@ -33,18 +33,18 @@ impl Client {
 
     pub async fn query_status(&self, addr: &str) -> Result<HttpReply> {
         let url = format!("http://{}/fk/v1", addr);
-        debug!("querying {}", &url);
+        debug!("{} querying", &url);
 
         let req = self
             .client
-            .get(url)
+            .get(&url)
             .timeout(Duration::from_secs(10))
             .build()?;
 
         let response = self.client.execute(req).await?;
         let bytes = response.bytes().await?;
 
-        debug!("queried, got {} bytes", bytes.len());
+        debug!("{} queried, got {} bytes", &url, bytes.len());
         let data = HttpReply::decode_length_delimited(bytes)?;
 
         Ok(data)
