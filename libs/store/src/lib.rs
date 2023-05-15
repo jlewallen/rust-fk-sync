@@ -41,19 +41,19 @@ impl Db {
 
     pub fn hydrate_station(&self, device_id: &DeviceId) -> Result<Option<Station>> {
         match self.get_station_by_device_id(device_id)? {
-            Some(mut existing) => {
-                let mut modules = self.get_modules(existing.id.ok_or(DbError::SeriousBug)?)?;
-
-                for mut module in modules.iter_mut() {
-                    let sensors = self.get_sensors(module.id.ok_or(DbError::SeriousBug)?)?;
-
-                    module.sensors = sensors;
-                }
-
-                existing.modules = modules;
-
-                Ok(Some(existing))
-            }
+            Some(station) => Ok(Some(Station {
+                modules: self
+                    .get_modules(station.id.ok_or(DbError::SeriousBug)?)?
+                    .into_iter()
+                    .map(|module| {
+                        Ok(Module {
+                            sensors: self.get_sensors(module.id.ok_or(DbError::SeriousBug)?)?,
+                            ..module
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                ..station
+            })),
             None => Ok(None),
         }
     }
