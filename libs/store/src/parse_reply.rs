@@ -33,7 +33,12 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
         device_id,
         generation_id,
         name: identity.name.to_owned(),
+        firmware: identity.firmware.to_owned(),
         last_seen: Utc::now(),
+        meta: Stream::default(),
+        data: Stream::default(),
+        battery: Battery::default(),
+        solar: Solar::default(),
         status: None,
         modules,
     })

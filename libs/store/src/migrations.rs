@@ -8,7 +8,15 @@ pub(crate) fn get_migrations<'m>() -> Migrations<'m> {
             device_id TEXT NOT NULL,
             generation_id TEXT NOT NULL,
             name TEXT NOT NULL,
+            firmware TEXT NOT NULL,
             last_seen DATETIME NOT NULL,
+            meta_size INTEGER NOT NULL,
+            meta_records INTEGER NOT NULL,
+            data_size INTEGER NOT NULL,
+            data_records INTEGER NOT NULL,
+            battery_percentage REAL NOT NULL,
+            battery_voltage REAL NOT NULL,
+            solar_voltage REAL NOT NULL,
             status BLOB
         );
 

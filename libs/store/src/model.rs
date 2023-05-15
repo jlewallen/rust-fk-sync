@@ -4,14 +4,36 @@ use chrono::{DateTime, Utc};
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct DeviceId(pub String);
 
+#[derive(Clone, Default, Debug)]
+pub struct Stream {
+    pub size: u64,
+    pub records: u64,
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct Battery {
+    pub percentage: f32,
+    pub voltage: f32,
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct Solar {
+    pub voltage: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Station {
     pub id: Option<i64>,
     pub device_id: DeviceId,
     pub generation_id: String,
     pub name: String,
+    pub firmware: String,
     pub last_seen: DateTime<Utc>,
     pub status: Option<Vec<u8>>,
+    pub meta: Stream,
+    pub data: Stream,
+    pub battery: Battery,
+    pub solar: Solar,
     pub modules: Vec<Module>,
 }
 
@@ -103,8 +125,13 @@ pub(crate) mod test {
                 device_id: DeviceId("device-id".to_owned()),
                 generation_id: "generation-id".to_owned(),
                 name: "Hoppy Kangaroo".to_owned(),
+                firmware: "00aabbccddeeffgg".to_owned(),
                 last_seen: Utc::now(),
                 status: None,
+                meta: Stream::default(),
+                data: Stream::default(),
+                battery: Battery::default(),
+                solar: Solar::default(),
                 modules: self.modules,
             }
         }
