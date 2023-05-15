@@ -42,7 +42,8 @@ pub(crate) fn get_migrations<'m>() -> Migrations<'m> {
             calibrated_uom TEXT NOT NULL,
             uncalibrated_uom TEXT NOT NULL,
             calibrated_value REAL,
-            uncalibrated_value REAL
+            uncalibrated_value REAL,
+            removed BOOL NOT NULL
         );
 
         CREATE INDEX sensor_idx_module_id ON sensor (module_id);

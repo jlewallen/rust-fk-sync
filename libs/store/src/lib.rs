@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
@@ -40,34 +42,86 @@ impl Db {
         Ok(())
     }
 
-    pub fn synchronize_reply(
+    fn synchronize_modules(
         &self,
-        device_id: DeviceId,
-        reply: query::HttpReply,
-    ) -> Result<Station> {
-        let station = http_reply_to_station(reply)?;
+        existing: Vec<Module>,
+        incoming: Vec<Module>,
+    ) -> Result<Vec<Module>> {
+        let existing: HashMap<_, _> = existing
+            .into_iter()
+            .map(|m| (m.hardware_id.clone(), m))
+            .collect();
+        let incoming: HashMap<_, _> = incoming
+            .into_iter()
+            .map(|m| (m.hardware_id.clone(), m))
+            .collect();
 
-        let existing = self.hydrate_station(&DeviceId(device_id.0))?;
+        let keys = existing.keys().clone().chain(incoming.keys().clone());
+
+        Ok(keys
+            .into_iter()
+            .map(|key| (existing.get(key), incoming.get(key)))
+            .map(|pair| match pair {
+                (Some(existing), Some(incoming)) => Ok(Module {
+                    position: incoming.position,
+                    configuration: incoming.configuration.clone(),
+                    name: incoming.name.clone(),
+                    path: incoming.path.clone(),
+                    sensors: self
+                        .synchronize_sensors(existing.sensors.clone(), incoming.sensors.clone())?,
+                    ..existing.clone()
+                }),
+                (None, Some(added)) => Ok(added.clone()),
+                (Some(removed), None) => {
+                    let mut module = removed.clone();
+                    module.removed = true;
+                    Ok(module)
+                }
+                (None, None) => panic!("Surprise module key?"),
+            })
+            .collect::<Result<Vec<_>>>()?)
+    }
+
+    fn synchronize_sensors(
+        &self,
+        existing: Vec<Sensor>,
+        incoming: Vec<Sensor>,
+    ) -> Result<Vec<Sensor>> {
+        let existing: HashMap<_, _> = existing.into_iter().map(|m| (m.number, m)).collect();
+        let incoming: HashMap<_, _> = incoming.into_iter().map(|m| (m.number, m)).collect();
+
+        let keys = existing.keys().clone().chain(incoming.keys().clone());
+
+        Ok(keys
+            .into_iter()
+            .map(|key| (existing.get(key), incoming.get(key)))
+            .map(|pair| match pair {
+                (Some(existing), Some(incoming)) => Ok(Sensor {
+                    value: incoming.value.clone(),
+                    ..existing.clone()
+                }),
+                (None, Some(added)) => Ok(added.clone()),
+                (Some(removed), None) => {
+                    let mut sensor = removed.clone();
+                    sensor.removed = true;
+                    Ok(sensor)
+                }
+                (None, None) => panic!("Surprise sensor key?"),
+            })
+            .collect::<Result<Vec<_>>>()?)
+    }
+
+    pub fn synchornize(&self, incoming: Station) -> Result<Station> {
+        let existing = self.hydrate_station(&incoming.device_id)?;
         let saving = match existing {
-            Some(station) => Station {
-                name: station.name,
-                generation_id: station.generation_id,
+            Some(existing) => Station {
+                name: incoming.name,
+                generation_id: incoming.generation_id,
                 last_seen: Utc::now(),
-                modules: station
-                    .modules
-                    .into_iter()
-                    .map(|module| Module {
-                        sensors: module
-                            .sensors
-                            .into_iter()
-                            .map(|sensor| Sensor { ..sensor })
-                            .collect(),
-                        ..module
-                    })
-                    .collect(),
-                ..station
+                modules: self.synchronize_modules(existing.modules, incoming.modules)?,
+                ..existing
             },
-            None => station,
+            None => incoming,
         };
 
         let saved = self.persist_station(&saving)?;
@@ -77,12 +131,23 @@ impl Db {
         Ok(saved)
     }
 
+    pub fn synchronize_reply(
+        &self,
+        device_id: DeviceId,
+        reply: query::HttpReply,
+    ) -> Result<Station> {
+        let incoming = http_reply_to_station(reply)?;
+        assert_eq!(device_id, incoming.device_id);
+        Ok(self.synchornize(incoming)?)
+    }
+
     pub fn hydrate_station(&self, device_id: &DeviceId) -> Result<Option<Station>> {
         match self.get_station_by_device_id(device_id)? {
             Some(station) => Ok(Some(Station {
                 modules: self
                     .get_modules(station.id.ok_or(DbError::SeriousBug)?)?
                     .into_iter()
+                    .filter(|module| !module.removed)
                     .map(|module| {
                         Ok(Module {
                             sensors: self.get_sensors(module.id.ok_or(DbError::SeriousBug)?)?,
@@ -343,8 +408,8 @@ impl Db {
         let mut stmt = conn.prepare(
             r#"
             INSERT INTO sensor
-            (module_id, number, flags, key, path, calibrated_uom, uncalibrated_uom, calibrated_value, uncalibrated_value) VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (module_id, number, flags, key, path, calibrated_uom, uncalibrated_uom, calibrated_value, uncalibrated_value, removed) VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )?;
 
@@ -357,7 +422,8 @@ impl Db {
             sensor.calibrated_uom,
             sensor.uncalibrated_uom,
             sensor.value.as_ref().map(|v| v.value),
-            sensor.value.as_ref().map(|v| v.uncalibrated)
+            sensor.value.as_ref().map(|v| v.uncalibrated),
+            sensor.removed
         ])?;
 
         assert_eq!(affected, 1);
@@ -374,6 +440,7 @@ impl Db {
             calibrated_uom: sensor.calibrated_uom.clone(),
             uncalibrated_uom: sensor.uncalibrated_uom.clone(),
             value: sensor.value.clone(),
+            removed: sensor.removed,
         })
     }
 
@@ -384,7 +451,7 @@ impl Db {
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"
-            UPDATE sensor SET number = ?, flags = ?, key = ?, path = ?, calibrated_uom = ?, uncalibrated_uom = ?, calibrated_value = ?, uncalibrated_value = ? WHERE id = ?
+            UPDATE sensor SET number = ?, flags = ?, key = ?, path = ?, calibrated_uom = ?, uncalibrated_uom = ?, calibrated_value = ?, uncalibrated_value = ?, removed = ? WHERE id = ?
             "#,
         )?;
 
@@ -397,6 +464,7 @@ impl Db {
             sensor.uncalibrated_uom,
             sensor.value.as_ref().map(|v| v.value),
             sensor.value.as_ref().map(|v| v.uncalibrated),
+            sensor.removed,
             sensor.id,
         ])?;
 
@@ -407,7 +475,7 @@ impl Db {
 
     pub fn get_sensors(&self, module_id: i64) -> Result<Vec<Sensor>> {
         let mut stmt = self.require_opened()?.prepare(
-            r#"SELECT id, module_id, number, flags, key, path, calibrated_uom, uncalibrated_uom, calibrated_value, uncalibrated_value
+            r#"SELECT id, module_id, number, flags, key, path, calibrated_uom, uncalibrated_uom, calibrated_value, uncalibrated_value, removed
                FROM sensor WHERE module_id = ?"#,
         )?;
 
@@ -431,6 +499,7 @@ impl Db {
                 path: row.get(5)?,
                 calibrated_uom: row.get(6)?,
                 uncalibrated_uom: row.get(7)?,
+                removed: row.get(10)?,
                 value,
             })
         })?;
@@ -448,7 +517,7 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    use crate::test::{test_module, test_sensor, test_station};
+    use crate::test::{test_module, test_sensor, test_station, Build};
 
     use super::*;
 
@@ -590,6 +659,88 @@ mod tests {
         let sensors = db.get_sensors(module.id.expect("No module id"))?;
         assert_eq!(sensors.len(), 1);
         assert_eq!(sensors.get(0).unwrap().key, "renamed-sensor-0");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_new_station() -> Result<()> {
+        let mut db = Db::new();
+        db.open()?;
+
+        let incoming = test_station();
+        let station = db.synchornize(incoming)?;
+
+        assert!(station.id.is_some());
+
+        for module in station.modules {
+            assert!(module.id.is_some());
+            for sensor in module.sensors {
+                assert!(sensor.id.is_some());
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_station_with_only_field_changes() -> Result<()> {
+        let mut db = Db::new();
+        db.open()?;
+
+        let incoming = test_station();
+        let first = db.synchornize(incoming)?;
+
+        assert!(first.id.is_some());
+
+        let mut incoming = test_station();
+        incoming.name = "Renamed".to_owned();
+        let second = db.synchornize(incoming)?;
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.name, "Renamed");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_station_with_module_removed() -> Result<()> {
+        let mut db = Db::new();
+        db.open()?;
+
+        let incoming = test_station();
+        let first = db.synchornize(incoming)?;
+
+        assert!(first.id.is_some());
+
+        let mut incoming = test_station();
+        incoming.modules.clear();
+        let second = db.synchornize(incoming)?;
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.modules.len(), 1);
+        assert_eq!(second.modules.get(0).map(|m| m.removed), Some(true));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_station_with_module_added() -> Result<()> {
+        let mut db = Db::new();
+        db.open()?;
+
+        let build = Build::default();
+        let incoming = build.station();
+        let first = db.synchornize(incoming)?;
+
+        assert!(first.id.is_some());
+
+        let mut incoming = test_station();
+        incoming.modules.push(build.module(None));
+        let second = db.synchornize(incoming)?;
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.modules.len(), 2);
 
         Ok(())
     }

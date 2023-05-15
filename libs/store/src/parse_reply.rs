@@ -90,6 +90,7 @@ fn to_sensor(sc: &query::SensorCapabilities) -> Result<Sensor, ReplyMappingError
             value: v.value,
             uncalibrated: v.uncalibrated,
         }),
+        removed: false,
     })
 }
 
