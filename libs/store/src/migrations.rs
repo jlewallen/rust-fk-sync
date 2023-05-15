@@ -38,7 +38,6 @@ pub(crate) fn get_migrations<'m>() -> Migrations<'m> {
             number INTEGER NOT NULL,
             flags INTEGER NOT NULL,
             key TEXT NOT NULL,
-            path TEXT NOT NULL,
             calibrated_uom TEXT NOT NULL,
             uncalibrated_uom TEXT NOT NULL,
             calibrated_value REAL,

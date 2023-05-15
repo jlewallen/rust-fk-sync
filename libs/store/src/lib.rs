@@ -416,8 +416,8 @@ impl Db {
         let mut stmt = conn.prepare(
             r#"
             INSERT INTO sensor
-            (module_id, number, flags, key, path, calibrated_uom, uncalibrated_uom, calibrated_value, uncalibrated_value, removed) VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (module_id, number, flags, key, calibrated_uom, uncalibrated_uom, calibrated_value, uncalibrated_value, removed) VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )?;
 
@@ -426,7 +426,6 @@ impl Db {
             sensor.number,
             sensor.flags,
             sensor.key,
-            sensor.path,
             sensor.calibrated_uom,
             sensor.uncalibrated_uom,
             sensor.value.as_ref().map(|v| v.value),
@@ -444,7 +443,6 @@ impl Db {
             number: sensor.number,
             flags: sensor.flags,
             key: sensor.key.clone(),
-            path: sensor.path.clone(),
             calibrated_uom: sensor.calibrated_uom.clone(),
             uncalibrated_uom: sensor.uncalibrated_uom.clone(),
             value: sensor.value.clone(),
@@ -459,7 +457,7 @@ impl Db {
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"
-            UPDATE sensor SET number = ?, flags = ?, key = ?, path = ?, calibrated_uom = ?, uncalibrated_uom = ?, calibrated_value = ?, uncalibrated_value = ?, removed = ? WHERE id = ?
+            UPDATE sensor SET number = ?, flags = ?, key = ?, calibrated_uom = ?, uncalibrated_uom = ?, calibrated_value = ?, uncalibrated_value = ?, removed = ? WHERE id = ?
             "#,
         )?;
 
@@ -467,7 +465,6 @@ impl Db {
             sensor.number,
             sensor.flags,
             sensor.key,
-            sensor.path,
             sensor.calibrated_uom,
             sensor.uncalibrated_uom,
             sensor.value.as_ref().map(|v| v.value),
@@ -483,13 +480,13 @@ impl Db {
 
     pub fn get_sensors(&self, module_id: i64) -> Result<Vec<Sensor>> {
         let mut stmt = self.require_opened()?.prepare(
-            r#"SELECT id, module_id, number, flags, key, path, calibrated_uom, uncalibrated_uom, calibrated_value, uncalibrated_value, removed
+            r#"SELECT id, module_id, number, flags, key, calibrated_uom, uncalibrated_uom, calibrated_value, uncalibrated_value, removed
                FROM sensor WHERE module_id = ?"#,
         )?;
 
         let sensors = stmt.query_map(params![module_id], |row| {
-            let calibrated_value: Option<f32> = row.get(8)?;
-            let uncalibrated_value: Option<f32> = row.get(9)?;
+            let calibrated_value: Option<f32> = row.get(7)?;
+            let uncalibrated_value: Option<f32> = row.get(8)?;
             let value = match (calibrated_value, uncalibrated_value) {
                 (Some(calibrated), Some(uncalibrated)) => Some(LiveValue {
                     value: calibrated,
@@ -504,10 +501,9 @@ impl Db {
                 number: row.get(2)?,
                 flags: row.get(3)?,
                 key: row.get(4)?,
-                path: row.get(5)?,
-                calibrated_uom: row.get(6)?,
-                uncalibrated_uom: row.get(7)?,
-                removed: row.get(10)?,
+                calibrated_uom: row.get(5)?,
+                uncalibrated_uom: row.get(6)?,
+                removed: row.get(9)?,
                 value,
             })
         })?;

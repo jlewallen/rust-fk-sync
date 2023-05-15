@@ -83,7 +83,6 @@ fn to_sensor(sc: &query::SensorCapabilities) -> Result<Sensor, ReplyMappingError
         number: sc.number,
         flags: sc.flags,
         key: sc.name.to_owned(),
-        path: sc.path.to_owned(),
         calibrated_uom: sc.unit_of_measure.to_owned(),
         uncalibrated_uom: sc.uncalibrated_unit_of_measure.to_owned(),
         value: sc.value.as_ref().map(|v| LiveValue {

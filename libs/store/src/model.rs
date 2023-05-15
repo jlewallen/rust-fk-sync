@@ -44,7 +44,6 @@ pub struct Sensor {
     pub number: u32,
     pub flags: u32,
     pub key: String,
-    pub path: String,
     pub calibrated_uom: String,
     pub uncalibrated_uom: String,
     pub value: Option<LiveValue>,
@@ -169,7 +168,6 @@ pub(crate) mod test {
                 number: i as u32,
                 flags: 0,
                 key: format!("sensor-{}", i),
-                path: "UNUSED".to_owned(),
                 calibrated_uom: "m".to_owned(),
                 uncalibrated_uom: "mV".to_owned(),
                 value: Some(LiveValue {
@@ -225,7 +223,6 @@ pub(crate) mod test {
                 number: self.number as u32,
                 flags: 0,
                 key: format!("sensor-{}", self.number),
-                path: "UNUSED".to_owned(),
                 calibrated_uom: "m".to_owned(),
                 uncalibrated_uom: "mV".to_owned(),
                 value: Some(LiveValue {
