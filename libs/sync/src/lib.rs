@@ -145,12 +145,9 @@ impl ConnectedDevice {
         self.backoff.reset();
         self.waiting_until = None;
 
-        match &self.state {
-            DeviceState::Expecting((_deadline, after)) => {
-                info!("expectation fulfilled");
-                self.transition(*Box::clone(&after)) // TODO into_inner on unstable
-            }
-            _ => {}
+        if let DeviceState::Expecting((_deadline, after)) = &self.state {
+            info!("expectation fulfilled");
+            self.transition(*Box::clone(after)) // TODO into_inner on unstable
         }
 
         match message {
@@ -188,7 +185,7 @@ impl ConnectedDevice {
             )));
             Some(Message::Require(range))
         } else {
-            if !self.total_records.is_none() {
+            if self.total_records.is_some() {
                 self.transition(DeviceState::Synced);
                 let elapsed = Instant::now() - self.syncing_started.unwrap();
                 info!("syncing took {:?}", elapsed);
@@ -198,10 +195,6 @@ impl ConnectedDevice {
     }
 
     fn requires(&self) -> Option<RecordRange> {
-        if self.total_records.is_none() {
-            return None;
-        }
-
         fn cap_length(r: RangeInclusive<u64>, len: u64) -> RangeInclusive<u64> {
             let end = *r.end();
             let start = *r.start();
@@ -231,7 +224,7 @@ impl ConnectedDevice {
             }
         }
 
-        let total_records = self.total_records.unwrap();
+        let total_records = self.total_records?;
         let total_required = RangeSetBlaze::from_iter([0..=total_records]) - &self.received;
 
         let mut requiring: Option<RangeInclusive<u64>> = None;
@@ -248,7 +241,7 @@ impl ConnectedDevice {
     }
 
     fn received(&mut self, records: RangeSetBlaze<u64>) {
-        let mut appending = records.clone();
+        let mut appending = records;
         self.received.append(&mut appending);
     }
 
@@ -327,7 +320,7 @@ impl ConnectedDevice {
     fn batch(&self) -> Option<RangeProgress> {
         match &self.state {
             DeviceState::Receiving(range) => {
-                let receiving = range.into_set();
+                let receiving = range.to_set();
                 let remaining = &receiving - &self.received;
                 let total = receiving.len() as usize;
                 let received = total - remaining.len() as usize;
@@ -443,9 +436,7 @@ impl Server {
                             for (device_id, addr) in devices
                                 .iter()
                                 .filter(|(_, connected)| connected.is_expired())
-                                .map(|(device_id, connected)| {
-                                    (device_id.clone(), connected.addr.clone())
-                                })
+                                .map(|(device_id, connected)| (device_id.clone(), connected.addr))
                                 .collect::<Vec<_>>()
                             {
                                 info!("{:?}@{:?} expired", device_id, addr);
@@ -561,14 +552,14 @@ impl RecordRange {
         *self.0.end()
     }
 
-    fn into_set(&self) -> RangeSetBlaze<u64> {
+    fn to_set(&self) -> RangeSetBlaze<u64> {
         RangeSetBlaze::from_iter([self.head()..=self.tail() - 1])
     }
 }
 
-impl Into<RangeInclusive<u64>> for RecordRange {
-    fn into(self) -> RangeInclusive<u64> {
-        self.0.clone()
+impl From<RecordRange> for RangeInclusive<u64> {
+    fn from(val: RecordRange) -> Self {
+        val.0
     }
 }
 
@@ -680,12 +671,12 @@ impl Message {
             } => {
                 writer.write_fixed32(3)?;
                 writer.write_fixed32(*head as u32)?;
-                writer.write_fixed32(*flags as u32)?;
-                assert!(records.len() == 0); // Laziness
+                writer.write_fixed32(*flags)?;
+                assert!(records.is_empty()); // Laziness
                 Ok(())
             }
             Message::Batch { flags } => {
-                writer.write_fixed32(*flags as u32)?;
+                writer.write_fixed32(*flags)?;
                 Ok(())
             }
         }

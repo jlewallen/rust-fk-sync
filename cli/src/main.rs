@@ -48,6 +48,7 @@ async fn main() -> Result<()> {
         }
     });
 
+    #[allow(clippy::unit_arg)]
     Ok(tokio::select! {
         _ = discovery.run(tx) => {},
         _ = server.run() => {},
