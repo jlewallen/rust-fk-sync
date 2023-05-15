@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
+use thiserror::Error;
 
 mod migrations;
 mod model;
@@ -11,6 +12,12 @@ pub use parse_reply::*;
 
 pub struct Db {
     conn: Option<Connection>,
+}
+
+#[derive(Error, Debug)]
+pub enum DbError {
+    #[error("Completely unexpected")]
+    SeriousBug,
 }
 
 impl Db {
@@ -30,6 +37,70 @@ impl Db {
         self.conn = Some(conn);
 
         Ok(())
+    }
+
+    pub fn hydrate_station(&self, device_id: &DeviceId) -> Result<Option<Station>> {
+        match self.get_station_by_device_id(device_id)? {
+            Some(mut existing) => {
+                let mut modules = self.get_modules(existing.id.ok_or(DbError::SeriousBug)?)?;
+
+                for mut module in modules.iter_mut() {
+                    let sensors = self.get_sensors(module.id.ok_or(DbError::SeriousBug)?)?;
+
+                    module.sensors = sensors;
+                }
+
+                existing.modules = modules;
+
+                Ok(Some(existing))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn persist_station(&self, station: &Station) -> Result<Station> {
+        let mut station = match station.id {
+            Some(_id) => self.update_station(station)?,
+            None => self.add_station(station)?,
+        };
+
+        assert!(station.id.is_some());
+
+        station.modules = station
+            .modules
+            .into_iter()
+            .map(|module| Module {
+                station_id: station.id,
+                ..module
+            })
+            .map(|module| match module.id {
+                Some(_id) => Ok(self.update_module(&module)?),
+                None => Ok(self.add_module(&module)?),
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|module| {
+                Ok(Module {
+                    sensors: module
+                        .sensors
+                        .into_iter()
+                        .map(|sensor| Sensor {
+                            module_id: module.id,
+                            ..sensor
+                        })
+                        .map(|sensor| {
+                            Ok(match sensor.id {
+                                Some(_id) => self.update_sensor(&sensor)?,
+                                None => self.add_sensor(&sensor)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    ..module
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(station)
     }
 
     pub fn add_station(&self, station: &Station) -> Result<Station> {
@@ -65,7 +136,7 @@ impl Db {
         })
     }
 
-    pub fn update_station(&self, station: &Station) -> Result<()> {
+    pub fn update_station(&self, station: &Station) -> Result<Station> {
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"UPDATE station SET generation_id = ?, name = ?, last_seen = ?, status = ? WHERE id = ?"#,
@@ -81,7 +152,24 @@ impl Db {
 
         assert_eq!(affected, 1);
 
-        Ok(())
+        Ok(station.clone())
+    }
+
+    fn row_to_station(&self, row: &rusqlite::Row) -> Result<Station, rusqlite::Error> {
+        let last_seen: String = row.get(4)?;
+        let last_seen = DateTime::parse_from_rfc3339(&last_seen)
+            .expect("Parsing last_seen")
+            .with_timezone(&Utc);
+
+        Ok(Station {
+            id: row.get(0)?,
+            device_id: DeviceId(row.get(1)?),
+            generation_id: row.get(2)?,
+            name: row.get(3)?,
+            last_seen,
+            status: row.get(5)?,
+            modules: Vec::new(),
+        })
     }
 
     pub fn get_stations(&self) -> Result<Vec<Station>> {
@@ -89,27 +177,25 @@ impl Db {
             r#"SELECT id, device_id, generation_id, name, last_seen, status FROM station"#,
         )?;
 
-        let stations = stmt.query_map(params![], |row| {
-            let last_seen: String = row.get(4)?;
-            let last_seen = DateTime::parse_from_rfc3339(&last_seen)
-                .expect("Parsing last_seen")
-                .with_timezone(&Utc);
-
-            Ok(Station {
-                id: row.get(0)?,
-                device_id: DeviceId(row.get(1)?),
-                generation_id: row.get(2)?,
-                name: row.get(3)?,
-                last_seen,
-                status: row.get(5)?,
-                modules: Vec::new(),
-            })
-        })?;
+        let stations = stmt.query_map(params![], |row| Ok(self.row_to_station(row)?))?;
 
         Ok(stations.map(|r| Ok(r?)).collect::<Result<Vec<_>>>()?)
     }
 
+    pub fn get_station_by_device_id(&self, device_id: &DeviceId) -> Result<Option<Station>> {
+        let mut stmt = self.require_opened()?.prepare(
+            r#"SELECT id, device_id, generation_id, name, last_seen, status FROM station WHERE device_id = ?"#,
+        )?;
+
+        let stations = stmt.query_map(params![device_id.0], |row| Ok(self.row_to_station(row)?))?;
+        let stations = stations.map(|r| Ok(r?)).collect::<Result<Vec<_>>>()?;
+        Ok(stations.first().cloned())
+    }
+
     pub fn add_module(&self, module: &Module) -> Result<Module> {
+        assert!(module.id.is_none());
+        assert!(module.station_id.is_some());
+
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"
@@ -138,7 +224,7 @@ impl Db {
         let id = Some(conn.last_insert_rowid());
 
         Ok(Module {
-            id: id,
+            id,
             station_id: module.station_id,
             hardware_id: module.hardware_id.clone(),
             header: module.header.clone(),
@@ -152,7 +238,10 @@ impl Db {
         })
     }
 
-    pub fn update_module(&self, module: &Module) -> Result<()> {
+    pub fn update_module(&self, module: &Module) -> Result<Module> {
+        assert!(module.id.is_some());
+        assert!(module.station_id.is_some());
+
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"
@@ -176,7 +265,7 @@ impl Db {
 
         assert_eq!(affected, 1);
 
-        Ok(())
+        Ok(module.clone())
     }
 
     pub fn get_modules(&self, station_id: i64) -> Result<Vec<Module>> {
@@ -209,6 +298,9 @@ impl Db {
     }
 
     pub fn add_sensor(&self, sensor: &Sensor) -> Result<Sensor> {
+        assert!(sensor.id.is_none());
+        assert!(sensor.module_id.is_some());
+
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"
@@ -235,7 +327,7 @@ impl Db {
         let id = Some(conn.last_insert_rowid());
 
         Ok(Sensor {
-            id: id,
+            id,
             module_id: sensor.module_id,
             number: sensor.number,
             flags: sensor.flags,
@@ -247,7 +339,10 @@ impl Db {
         })
     }
 
-    pub fn update_sensor(&self, sensor: &Sensor) -> Result<()> {
+    pub fn update_sensor(&self, sensor: &Sensor) -> Result<Sensor> {
+        assert!(sensor.id.is_some());
+        assert!(sensor.module_id.is_some());
+
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"
@@ -269,7 +364,7 @@ impl Db {
 
         assert_eq!(affected, 1);
 
-        Ok(())
+        Ok(sensor.clone())
     }
 
     pub fn get_sensors(&self, module_id: i64) -> Result<Vec<Sensor>> {
