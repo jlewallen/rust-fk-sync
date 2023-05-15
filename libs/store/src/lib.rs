@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use thiserror::Error;
+use tracing::*;
 
 mod migrations;
 mod model;
@@ -37,6 +38,43 @@ impl Db {
         self.conn = Some(conn);
 
         Ok(())
+    }
+
+    pub fn synchronize_reply(
+        &self,
+        device_id: DeviceId,
+        reply: query::HttpReply,
+    ) -> Result<Station> {
+        let station = http_reply_to_station(reply)?;
+
+        let existing = self.hydrate_station(&DeviceId(device_id.0))?;
+        let saving = match existing {
+            Some(station) => Station {
+                name: station.name,
+                generation_id: station.generation_id,
+                last_seen: Utc::now(),
+                modules: station
+                    .modules
+                    .into_iter()
+                    .map(|module| Module {
+                        sensors: module
+                            .sensors
+                            .into_iter()
+                            .map(|sensor| Sensor { ..sensor })
+                            .collect(),
+                        ..module
+                    })
+                    .collect(),
+                ..station
+            },
+            None => station,
+        };
+
+        let saved = self.persist_station(&saving)?;
+
+        info!("saved {:?}", &saved);
+
+        Ok(saved)
     }
 
     pub fn hydrate_station(&self, device_id: &DeviceId) -> Result<Option<Station>> {
