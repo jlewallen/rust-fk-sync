@@ -1,11 +1,10 @@
-use std::collections::{HashMap, HashSet};
-
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use thiserror::Error;
 use tracing::*;
 
+mod merge;
 mod migrations;
 mod model;
 mod parse_reply;
@@ -42,96 +41,9 @@ impl Db {
         Ok(())
     }
 
-    fn synchronize_modules(
-        &self,
-        existing: Vec<Module>,
-        incoming: Vec<Module>,
-    ) -> Result<Vec<Module>> {
-        let existing: HashMap<_, _> = existing
-            .into_iter()
-            .map(|m| (m.hardware_id.clone(), m))
-            .collect();
-        let incoming: HashMap<_, _> = incoming
-            .into_iter()
-            .map(|m| (m.hardware_id.clone(), m))
-            .collect();
-
-        let keys: HashSet<_> = existing
-            .keys()
-            .clone()
-            .chain(incoming.keys().clone())
-            .collect();
-
-        Ok(keys
-            .into_iter()
-            .map(|key| (existing.get(key), incoming.get(key)))
-            .map(|pair| match pair {
-                (Some(existing), Some(incoming)) => Ok(Module {
-                    position: incoming.position,
-                    configuration: incoming.configuration.clone(),
-                    name: incoming.name.clone(),
-                    path: incoming.path.clone(),
-                    sensors: self
-                        .synchronize_sensors(existing.sensors.clone(), incoming.sensors.clone())?,
-                    ..existing.clone()
-                }),
-                (None, Some(added)) => Ok(added.clone()),
-                (Some(removed), None) => {
-                    let mut module = removed.clone();
-                    module.removed = true;
-                    Ok(module)
-                }
-                (None, None) => panic!("Surprise module key?"),
-            })
-            .collect::<Result<Vec<_>>>()?)
-    }
-
-    fn synchronize_sensors(
-        &self,
-        existing: Vec<Sensor>,
-        incoming: Vec<Sensor>,
-    ) -> Result<Vec<Sensor>> {
-        let existing: HashMap<_, _> = existing.into_iter().map(|m| (m.number, m)).collect();
-        let incoming: HashMap<_, _> = incoming.into_iter().map(|m| (m.number, m)).collect();
-
-        let keys: HashSet<_> = existing
-            .keys()
-            .clone()
-            .chain(incoming.keys().clone())
-            .collect();
-
-        Ok(keys
-            .into_iter()
-            .map(|key| (existing.get(key), incoming.get(key)))
-            .map(|pair| match pair {
-                (Some(existing), Some(incoming)) => Ok(Sensor {
-                    value: incoming.value.clone(),
-                    ..existing.clone()
-                }),
-                (None, Some(added)) => Ok(added.clone()),
-                (Some(removed), None) => {
-                    let mut sensor = removed.clone();
-                    sensor.removed = true;
-                    Ok(sensor)
-                }
-                (None, None) => panic!("Surprise sensor key?"),
-            })
-            .collect::<Result<Vec<_>>>()?)
-    }
-
     pub fn synchornize(&self, incoming: Station) -> Result<Station> {
         let existing = self.hydrate_station(&incoming.device_id)?;
-        let saving = match existing {
-            Some(existing) => Station {
-                name: incoming.name,
-                generation_id: incoming.generation_id,
-                last_seen: Utc::now(),
-                modules: self.synchronize_modules(existing.modules, incoming.modules)?,
-                ..existing
-            },
-            None => incoming,
-        };
-
+        let saving = merge::merge(existing, incoming)?;
         let saved = self.persist_station(&saving)?;
 
         info!("{:?} saved {:?}", &saved.device_id, &saved.id);
@@ -139,11 +51,7 @@ impl Db {
         Ok(saved)
     }
 
-    pub fn synchronize_reply(
-        &self,
-        device_id: DeviceId,
-        reply: query::HttpReply,
-    ) -> Result<Station> {
+    pub fn merge_reply(&self, device_id: DeviceId, reply: query::HttpReply) -> Result<Station> {
         let incoming = http_reply_to_station(reply)?;
         assert_eq!(device_id, incoming.device_id);
         Ok(self.synchornize(incoming)?)
@@ -326,7 +234,10 @@ impl Db {
 
     pub fn get_stations(&self) -> Result<Vec<Station>> {
         let mut stmt = self.require_opened()?.prepare(
-            r#"SELECT id, device_id, generation_id, name, firmware, last_seen, meta_size, meta_records, data_size, data_records, battery_percentage, battery_voltage, solar_voltage, status FROM station"#,
+            r#"SELECT id, device_id, generation_id, name, firmware, last_seen,
+               meta_size, meta_records, data_size, data_records,
+               battery_percentage, battery_voltage, solar_voltage, status
+               FROM station"#,
         )?;
 
         let stations = stmt.query_map(params![], |row| Ok(self.row_to_station(row)?))?;
@@ -336,7 +247,10 @@ impl Db {
 
     pub fn get_station_by_device_id(&self, device_id: &DeviceId) -> Result<Option<Station>> {
         let mut stmt = self.require_opened()?.prepare(
-            r#"SELECT id, device_id, generation_id, name, firmware, last_seen, meta_size, meta_records, data_size, data_records, battery_percentage, battery_voltage, solar_voltage, status FROM station WHERE device_id = ?"#,
+            r#"SELECT id, device_id, generation_id, name, firmware, last_seen,
+               meta_size, meta_records, data_size, data_records,
+               battery_percentage, battery_voltage, solar_voltage, status
+               FROM station WHERE device_id = ?"#,
         )?;
 
         let stations = stmt.query_map(params![device_id.0], |row| Ok(self.row_to_station(row)?))?;
