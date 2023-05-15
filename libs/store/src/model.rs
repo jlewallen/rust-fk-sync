@@ -58,18 +58,47 @@ pub struct LiveValue {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod test {
-    use std::sync::atomic::AtomicI64;
-
     use super::*;
 
-    #[derive(Default)]
-    pub struct Build {
-        module_counter: AtomicI64,
+    pub fn build() -> Build {
+        Build::default()
     }
 
+    #[derive(Default)]
+    pub struct Build {}
+
     impl Build {
-        pub fn station(&self) -> Station {
+        pub fn station(&self) -> BuildStation {
+            BuildStation::default()
+        }
+
+        pub fn module(&self) -> BuildModule {
+            BuildModule::default()
+        }
+
+        pub fn sensor(&self) -> BuildSensor {
+            BuildSensor::default()
+        }
+    }
+
+    #[derive(Default)]
+    pub struct BuildStation {
+        modules: Vec<Module>,
+    }
+
+    impl BuildStation {
+        pub fn module(mut self, module: Module) -> Self {
+            self.modules.push(module);
+            self
+        }
+
+        pub fn with_basic_module(self, name: &str) -> Self {
+            self.module(BuildModule::default().basic(name).build())
+        }
+
+        pub fn build(self) -> Station {
             Station {
                 id: None,
                 device_id: DeviceId("device-id".to_owned()),
@@ -77,41 +106,126 @@ pub(crate) mod test {
                 name: "Hoppy Kangaroo".to_owned(),
                 last_seen: Utc::now(),
                 status: None,
-                modules: vec![test_module(None)],
+                modules: self.modules,
             }
         }
+    }
 
-        pub fn module(&self, station_id: Option<i64>) -> Module {
-            let i = self
-                .module_counter
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    pub struct BuildModule {
+        station_id: Option<i64>,
+        hardware_id: Option<String>,
+        name: String,
+        position: u32,
+        sensors: Vec<Sensor>,
+    }
+
+    impl Default for BuildModule {
+        fn default() -> Self {
+            Self {
+                station_id: None,
+                hardware_id: None,
+                name: "fk.modules.test".to_owned(),
+                position: 0,
+                sensors: Vec::new(),
+            }
+        }
+    }
+
+    impl BuildModule {
+        pub fn station_id(mut self, station_id: Option<i64>) -> Self {
+            self.station_id = station_id;
+            self
+        }
+
+        pub fn basic(self, name: &str) -> Self {
+            self.hardware_id(name).named(name).sensor().sensor()
+        }
+
+        pub fn position(mut self, position: u32) -> Self {
+            self.position = position;
+            self
+        }
+
+        pub fn hardware_id(mut self, hardware_id: &str) -> Self {
+            self.hardware_id = Some(hardware_id.to_owned());
+            self
+        }
+
+        pub fn named(mut self, name: &str) -> Self {
+            self.name = name.to_owned();
+            self
+        }
+
+        pub fn with_sensor(mut self, sensor: Sensor) -> Self {
+            self.sensors.push(sensor);
+            self
+        }
+
+        pub fn sensor(self) -> Self {
+            let i = self.sensors.len();
+            self.with_sensor(Sensor {
+                id: None,
+                module_id: None,
+                number: i as u32,
+                flags: 0,
+                key: format!("sensor-{}", i),
+                path: "UNUSED".to_owned(),
+                calibrated_uom: "m".to_owned(),
+                uncalibrated_uom: "mV".to_owned(),
+                value: Some(LiveValue {
+                    value: 3.14159,
+                    uncalibrated: 1200.0,
+                }),
+                removed: false,
+            })
+        }
+
+        pub fn build(self) -> Module {
             Module {
                 id: None,
-                station_id,
-                hardware_id: format!("module-{}-hardware-id", i),
+                station_id: self.station_id,
+                hardware_id: self.hardware_id.unwrap_or(self.name.clone()),
                 header: ModuleHeader {
                     manufacturer: 1,
                     kind: 2,
                     version: 3,
                 },
                 flags: 0,
-                position: 0,
-                name: format!("module-{}", i),
-                path: format!("module-{}", i),
+                position: self.position,
+                name: self.name,
+                path: format!("/fk/v1/modules/{}", self.position),
                 configuration: None,
                 removed: false,
-                sensors: vec![test_sensor(None)],
+                sensors: self.sensors,
             }
         }
+    }
 
-        pub fn sensor(&self, module_id: Option<i64>) -> Sensor {
+    #[derive(Default)]
+    pub struct BuildSensor {
+        module_id: Option<i64>,
+        number: u32,
+    }
+
+    impl BuildSensor {
+        pub fn module_id(mut self, module_id: Option<i64>) -> Self {
+            self.module_id = module_id;
+            self
+        }
+
+        pub fn number(mut self, number: u32) -> Self {
+            self.number = number;
+            self
+        }
+
+        pub fn build(self) -> Sensor {
             Sensor {
                 id: None,
-                module_id,
-                number: 1,
+                module_id: self.module_id,
+                number: self.number as u32,
                 flags: 0,
-                key: "sensor-0".to_owned(),
-                path: "sensor-0".to_owned(),
+                key: format!("sensor-{}", self.number),
+                path: "UNUSED".to_owned(),
                 calibrated_uom: "m".to_owned(),
                 uncalibrated_uom: "mV".to_owned(),
                 value: Some(LiveValue {
@@ -121,17 +235,5 @@ pub(crate) mod test {
                 removed: false,
             }
         }
-    }
-
-    pub fn test_station() -> Station {
-        Build::default().station()
-    }
-
-    pub fn test_module(station_id: Option<i64>) -> Module {
-        Build::default().module(station_id)
-    }
-
-    pub fn test_sensor(module_id: Option<i64>) -> Sensor {
-        Build::default().sensor(module_id)
     }
 }

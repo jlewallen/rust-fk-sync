@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -56,7 +56,11 @@ impl Db {
             .map(|m| (m.hardware_id.clone(), m))
             .collect();
 
-        let keys = existing.keys().clone().chain(incoming.keys().clone());
+        let keys: HashSet<_> = existing
+            .keys()
+            .clone()
+            .chain(incoming.keys().clone())
+            .collect();
 
         Ok(keys
             .into_iter()
@@ -90,7 +94,11 @@ impl Db {
         let existing: HashMap<_, _> = existing.into_iter().map(|m| (m.number, m)).collect();
         let incoming: HashMap<_, _> = incoming.into_iter().map(|m| (m.number, m)).collect();
 
-        let keys = existing.keys().clone().chain(incoming.keys().clone());
+        let keys: HashSet<_> = existing
+            .keys()
+            .clone()
+            .chain(incoming.keys().clone())
+            .collect();
 
         Ok(keys
             .into_iter()
@@ -126,7 +134,7 @@ impl Db {
 
         let saved = self.persist_station(&saving)?;
 
-        info!("saved {:?}", &saved);
+        info!("{:?} saved {:?}", &saved.device_id, &saved.id);
 
         Ok(saved)
     }
@@ -517,7 +525,7 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    use crate::test::{test_module, test_sensor, test_station, Build};
+    use crate::test::*;
 
     use super::*;
 
@@ -534,7 +542,7 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        let added = db.add_station(&test_station())?;
+        let added = db.add_station(&BuildStation::default().build())?;
         assert_ne!(added.id, None);
 
         Ok(())
@@ -545,7 +553,7 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        db.add_station(&test_station())?;
+        db.add_station(&BuildStation::default().build())?;
 
         let stations = db.get_stations()?;
         assert_eq!(stations.len(), 1);
@@ -558,7 +566,7 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        let mut added = db.add_station(&test_station())?;
+        let mut added = db.add_station(&BuildStation::default().build())?;
 
         let stations = db.get_stations()?;
         assert_eq!(stations.len(), 1);
@@ -579,10 +587,10 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        let station = db.add_station(&test_station())?;
+        let station = db.add_station(&BuildStation::default().build())?;
         assert_ne!(station.id, None);
 
-        let module = db.add_module(&test_module(station.id))?;
+        let module = db.add_module(&BuildModule::default().station_id(station.id).build())?;
         assert_ne!(module.id, None);
 
         let modules = db.get_modules(station.id.expect("No station id"))?;
@@ -596,10 +604,16 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        let station = db.add_station(&test_station())?;
+        let station = db.add_station(&BuildStation::default().build())?;
         assert_ne!(station.id, None);
 
-        let mut added = db.add_module(&test_module(station.id))?;
+        let mut added = db.add_module(
+            &BuildModule::default()
+                .hardware_id("module-0")
+                .named("module-0")
+                .station_id(station.id)
+                .build(),
+        )?;
 
         let modules = db.get_modules(station.id.expect("No station id"))?;
         assert_eq!(modules.len(), 1);
@@ -620,13 +634,13 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        let station = db.add_station(&test_station())?;
+        let station = db.add_station(&BuildStation::default().build())?;
         assert_ne!(station.id, None);
 
-        let module = db.add_module(&test_module(station.id))?;
+        let module = db.add_module(&BuildModule::default().station_id(station.id).build())?;
         assert_ne!(module.id, None);
 
-        let sensor = db.add_sensor(&test_sensor(module.id))?;
+        let sensor = db.add_sensor(&BuildSensor::default().module_id(module.id).build())?;
         assert_ne!(sensor.id, None);
 
         let sensors = db.get_sensors(module.id.expect("No module id"))?;
@@ -640,13 +654,13 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        let station = db.add_station(&test_station())?;
+        let station = db.add_station(&build().station().build())?;
         assert_ne!(station.id, None);
 
-        let module = db.add_module(&test_module(station.id))?;
+        let module = db.add_module(&build().module().station_id(station.id).build())?;
         assert_ne!(module.id, None);
 
-        let mut sensor = db.add_sensor(&test_sensor(module.id))?;
+        let mut sensor = db.add_sensor(&BuildSensor::default().module_id(module.id).build())?;
         assert_ne!(sensor.id, None);
 
         let sensors = db.get_sensors(module.id.expect("No module id"))?;
@@ -668,7 +682,7 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        let incoming = test_station();
+        let incoming = BuildStation::default().with_basic_module("basic-0").build();
         let station = db.synchornize(incoming)?;
 
         assert!(station.id.is_some());
@@ -688,12 +702,12 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        let incoming = test_station();
+        let incoming = BuildStation::default().with_basic_module("basic-0").build();
         let first = db.synchornize(incoming)?;
 
         assert!(first.id.is_some());
 
-        let mut incoming = test_station();
+        let mut incoming = BuildStation::default().with_basic_module("basic-0").build();
         incoming.name = "Renamed".to_owned();
         let second = db.synchornize(incoming)?;
 
@@ -708,13 +722,12 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        let incoming = test_station();
+        let incoming = BuildStation::default().with_basic_module("basic-0").build();
         let first = db.synchornize(incoming)?;
 
         assert!(first.id.is_some());
 
-        let mut incoming = test_station();
-        incoming.modules.clear();
+        let incoming = BuildStation::default().build();
         let second = db.synchornize(incoming)?;
 
         assert_eq!(first.id, second.id);
@@ -729,14 +742,15 @@ mod tests {
         let mut db = Db::new();
         db.open()?;
 
-        let build = Build::default();
-        let incoming = build.station();
+        let incoming = BuildStation::default().with_basic_module("basic-0").build();
         let first = db.synchornize(incoming)?;
 
         assert!(first.id.is_some());
 
-        let mut incoming = test_station();
-        incoming.modules.push(build.module(None));
+        let incoming = BuildStation::default()
+            .with_basic_module("basic-0")
+            .with_basic_module("basic-1")
+            .build();
         let second = db.synchornize(incoming)?;
 
         assert_eq!(first.id, second.id);
