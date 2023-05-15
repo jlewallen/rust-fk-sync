@@ -52,11 +52,10 @@ fn merge_modules(existing: Vec<Module>, incoming: Vec<Module>) -> Result<Vec<Mod
                 ..existing.clone()
             }),
             (None, Some(added)) => Ok(added.clone()),
-            (Some(removed), None) => {
-                let mut module = removed.clone();
-                module.removed = true;
-                Ok(module)
-            }
+            (Some(removed), None) => Ok(Module {
+                removed: true,
+                ..removed.clone()
+            }),
             (None, None) => panic!("Surprise module key?"),
         })
         .collect::<Result<Vec<_>>>()?)
@@ -85,11 +84,10 @@ fn merge_sensors(existing: Vec<Sensor>, incoming: Vec<Sensor>) -> Result<Vec<Sen
                 ..existing.clone()
             }),
             (None, Some(added)) => Ok(added.clone()),
-            (Some(removed), None) => {
-                let mut sensor = removed.clone();
-                sensor.removed = true;
-                Ok(sensor)
-            }
+            (Some(removed), None) => Ok(Sensor {
+                removed: true,
+                ..removed.clone()
+            }),
             (None, None) => panic!("Surprise sensor key?"),
         })
         .collect::<Result<Vec<_>>>()?)

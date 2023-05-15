@@ -78,48 +78,47 @@ impl Db {
     }
 
     pub fn persist_station(&self, station: &Station) -> Result<Station> {
-        let mut station = match station.id {
+        let station = match station.id {
             Some(_id) => self.update_station(station)?,
             None => self.add_station(station)?,
         };
 
-        assert!(station.id.is_some());
-
-        station.modules = station
-            .modules
-            .into_iter()
-            .map(|module| Module {
-                station_id: station.id,
-                ..module
-            })
-            .map(|module| match module.id {
-                Some(_id) => Ok(self.update_module(&module)?),
-                None => Ok(self.add_module(&module)?),
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .map(|module| {
-                Ok(Module {
-                    sensors: module
-                        .sensors
-                        .into_iter()
-                        .map(|sensor| Sensor {
-                            module_id: module.id,
-                            ..sensor
-                        })
-                        .map(|sensor| {
-                            Ok(match sensor.id {
-                                Some(_id) => self.update_sensor(&sensor)?,
-                                None => self.add_sensor(&sensor)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>>>()?,
+        Ok(Station {
+            modules: station
+                .modules
+                .into_iter()
+                .map(|module| Module {
+                    station_id: station.id,
                     ..module
                 })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(station)
+                .map(|module| match module.id {
+                    Some(_id) => Ok(self.update_module(&module)?),
+                    None => Ok(self.add_module(&module)?),
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .map(|module| {
+                    Ok(Module {
+                        sensors: module
+                            .sensors
+                            .into_iter()
+                            .map(|sensor| Sensor {
+                                module_id: module.id,
+                                ..sensor
+                            })
+                            .map(|sensor| {
+                                Ok(match sensor.id {
+                                    Some(_id) => self.update_sensor(&sensor)?,
+                                    None => self.add_sensor(&sensor)?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                        ..module
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            ..station
+        })
     }
 
     pub fn add_station(&self, station: &Station) -> Result<Station> {
