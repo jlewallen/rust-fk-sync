@@ -13,6 +13,10 @@ pub enum ReplyMappingError {
     NoIdentity,
     #[error("No module header")]
     NoModuleHeader,
+    #[error("No sensor")]
+    NoModule,
+    #[error("No module")]
+    NoSensor,
 }
 
 pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingError> {
@@ -23,9 +27,13 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
     let generation_id = hex::encode(identity.generation_id);
 
     let modules = reply
-        .modules
+        .live_readings
         .iter()
-        .map(|mc| Ok(to_module(mc)?))
+        .flat_map(|r| {
+            r.modules
+                .iter()
+                .map(|m| Ok(to_module_with_live_readings(&m)?))
+        })
         .collect::<Result<Vec<_>, ReplyMappingError>>()?;
 
     Ok(Station {
@@ -44,17 +52,29 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
     })
 }
 
-fn to_module(mc: &query::ModuleCapabilities) -> Result<Module, ReplyMappingError> {
+fn to_module_with_live_readings(
+    m: &query::LiveModuleReadings,
+) -> Result<Module, ReplyMappingError> {
+    let sensors = m
+        .readings
+        .iter()
+        .map(|sc| Ok(to_sensor_with_live_readings(sc)?))
+        .collect::<Result<Vec<_>, ReplyMappingError>>()?;
+
+    to_module(
+        m.module.as_ref().ok_or(ReplyMappingError::NoModule)?,
+        sensors,
+    )
+}
+
+fn to_module(
+    mc: &query::ModuleCapabilities,
+    sensors: Vec<Sensor>,
+) -> Result<Module, ReplyMappingError> {
     let header = mc
         .header
         .as_ref()
         .ok_or(ReplyMappingError::NoModuleHeader)?;
-
-    let sensors = mc
-        .sensors
-        .iter()
-        .map(|sc| Ok(to_sensor(sc)?))
-        .collect::<Result<Vec<_>, ReplyMappingError>>()?;
 
     let configuration = if mc.configuration.len() > 0 {
         Some(mc.configuration.clone())
@@ -81,7 +101,19 @@ fn to_module(mc: &query::ModuleCapabilities) -> Result<Module, ReplyMappingError
     })
 }
 
-fn to_sensor(sc: &query::SensorCapabilities) -> Result<Sensor, ReplyMappingError> {
+fn to_sensor_with_live_readings(s: &query::LiveSensorReading) -> Result<Sensor, ReplyMappingError> {
+    let value = Some(LiveValue {
+        value: s.value,
+        uncalibrated: s.uncalibrated,
+    });
+
+    to_sensor(s.sensor.as_ref().ok_or(ReplyMappingError::NoSensor)?, value)
+}
+
+fn to_sensor(
+    sc: &query::SensorCapabilities,
+    value: Option<LiveValue>,
+) -> Result<Sensor, ReplyMappingError> {
     Ok(Sensor {
         id: None,
         module_id: None,
@@ -90,11 +122,8 @@ fn to_sensor(sc: &query::SensorCapabilities) -> Result<Sensor, ReplyMappingError
         key: sc.name.to_owned(),
         calibrated_uom: sc.unit_of_measure.to_owned(),
         uncalibrated_uom: sc.uncalibrated_unit_of_measure.to_owned(),
-        value: sc.value.as_ref().map(|v| LiveValue {
-            value: v.value,
-            uncalibrated: v.uncalibrated,
-        }),
         removed: false,
+        value,
     })
 }
 
