@@ -31,7 +31,7 @@ pub(crate) fn get_migrations<'m>() -> Migrations<'m> {
             version INTEGER NOT NULL,
             flags INTEGER NOT NULL,
             position INTEGER NOT NULL,
-            name TEXT NOT NULL,
+            key TEXT NOT NULL,
             path TEXT NOT NULL,
             configuration BLOB,
             removed BOOL NOT NULL

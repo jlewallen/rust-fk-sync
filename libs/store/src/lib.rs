@@ -265,7 +265,7 @@ impl Db {
         let mut stmt = conn.prepare(
             r#"
             INSERT INTO module
-            (station_id, hardware_id, manufacturer, kind, version, flags, position, name, path, configuration, removed) VALUES
+            (station_id, hardware_id, manufacturer, kind, version, flags, position, key, path, configuration, removed) VALUES
             (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )?;
@@ -278,7 +278,7 @@ impl Db {
             module.header.version,
             module.flags,
             module.position,
-            module.name,
+            module.key,
             module.path,
             module.configuration,
             module.removed,
@@ -295,7 +295,7 @@ impl Db {
             header: module.header.clone(),
             flags: module.flags,
             position: module.position,
-            name: module.name.clone(),
+            key: module.key.clone(),
             path: module.path.clone(),
             sensors: module.sensors.clone(),
             removed: module.removed,
@@ -310,7 +310,7 @@ impl Db {
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"
-            UPDATE module SET station_id = ?, manufacturer = ?, kind = ?, version = ?, flags = ?, position = ?, name = ?, path = ?, configuration = ?, removed = ? WHERE id = ?
+            UPDATE module SET station_id = ?, manufacturer = ?, kind = ?, version = ?, flags = ?, position = ?, key = ?, path = ?, configuration = ?, removed = ? WHERE id = ?
             "#,
         )?;
 
@@ -321,7 +321,7 @@ impl Db {
             module.header.version,
             module.flags,
             module.position,
-            module.name,
+            module.key,
             module.path,
             module.configuration,
             module.removed,
@@ -335,7 +335,7 @@ impl Db {
 
     pub fn get_modules(&self, station_id: i64) -> Result<Vec<Module>> {
         let mut stmt = self.require_opened()?.prepare(
-            r#"SELECT id, station_id, hardware_id, manufacturer, kind, version, flags, position, name, path, configuration, removed
+            r#"SELECT id, station_id, hardware_id, manufacturer, kind, version, flags, position, key, path, configuration, removed
                FROM module WHERE station_id = ?"#,
         )?;
 
@@ -351,7 +351,7 @@ impl Db {
                 },
                 flags: row.get(6)?,
                 position: row.get(7)?,
-                name: row.get(8)?,
+                key: row.get(8)?,
                 path: row.get(9)?,
                 configuration: row.get(10)?,
                 removed: row.get(11)?,
@@ -567,14 +567,14 @@ mod tests {
 
         let modules = db.get_modules(station.id.expect("No station id"))?;
         assert_eq!(modules.len(), 1);
-        assert_eq!(modules.get(0).unwrap().name, "module-0");
+        assert_eq!(modules.get(0).unwrap().key, "module-0");
 
-        added.name = "renamed-module-0".to_owned();
+        added.key = "renamed-module-0".to_owned();
         db.update_module(&added)?;
 
         let modules = db.get_modules(station.id.expect("No station id"))?;
         assert_eq!(modules.len(), 1);
-        assert_eq!(modules.get(0).unwrap().name, "renamed-module-0");
+        assert_eq!(modules.get(0).unwrap().key, "renamed-module-0");
 
         Ok(())
     }

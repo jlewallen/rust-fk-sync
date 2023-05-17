@@ -46,7 +46,7 @@ fn merge_modules(existing: Vec<Module>, incoming: Vec<Module>) -> Result<Vec<Mod
                 position: incoming.position,
                 flags: incoming.flags,
                 configuration: incoming.configuration.clone(),
-                name: incoming.name.clone(),
+                key: incoming.key.clone(),
                 path: incoming.path.clone(),
                 sensors: merge_sensors(existing.sensors.clone(), incoming.sensors.clone())?,
                 ..existing.clone()

@@ -93,7 +93,7 @@ fn to_module(
         },
         flags: mc.flags,
         position: mc.position,
-        name: mc.name.to_owned(),
+        key: mc.name.to_owned(),
         path: mc.path.to_owned(),
         configuration,
         removed: false,
