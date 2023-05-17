@@ -3,7 +3,7 @@ use chrono::Utc;
 use thiserror::Error;
 
 use crate::model::*;
-use query::HttpReply;
+use query::device::HttpReply;
 
 #[derive(Error, Debug)]
 pub enum ReplyMappingError {
@@ -53,7 +53,7 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
 }
 
 fn to_module_with_live_readings(
-    m: &query::LiveModuleReadings,
+    m: &query::device::LiveModuleReadings,
 ) -> Result<Module, ReplyMappingError> {
     let sensors = m
         .readings
@@ -68,7 +68,7 @@ fn to_module_with_live_readings(
 }
 
 fn to_module(
-    mc: &query::ModuleCapabilities,
+    mc: &query::device::ModuleCapabilities,
     sensors: Vec<Sensor>,
 ) -> Result<Module, ReplyMappingError> {
     let header = mc
@@ -101,7 +101,9 @@ fn to_module(
     })
 }
 
-fn to_sensor_with_live_readings(s: &query::LiveSensorReading) -> Result<Sensor, ReplyMappingError> {
+fn to_sensor_with_live_readings(
+    s: &query::device::LiveSensorReading,
+) -> Result<Sensor, ReplyMappingError> {
     let value = Some(LiveValue {
         value: s.value,
         uncalibrated: s.uncalibrated,
@@ -111,7 +113,7 @@ fn to_sensor_with_live_readings(s: &query::LiveSensorReading) -> Result<Sensor, 
 }
 
 fn to_sensor(
-    sc: &query::SensorCapabilities,
+    sc: &query::device::SensorCapabilities,
     value: Option<LiveValue>,
 ) -> Result<Sensor, ReplyMappingError> {
     Ok(Sensor {
@@ -129,7 +131,7 @@ fn to_sensor(
 
 #[cfg(test)]
 mod tests {
-    use query::parse_http_reply;
+    use query::device::parse_http_reply;
 
     use super::*;
 

@@ -54,6 +54,32 @@ pub(crate) fn get_migrations<'m>() -> Migrations<'m> {
         );
 
         CREATE INDEX sensor_idx_module_id ON sensor (module_id);
+
+        CREATE TABLE sync_download (
+            id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+            station_id INTEGER NOT NULL REFERENCES station(id),
+            generation_id TEXT NOT NULL,
+            started DATETIME NOT NULL,
+            begin INTEGER NOT NULL,
+            end INTEGER NOT NULL,
+            finished DATETIME,
+            error TEXT
+        );
+
+        CREATE INDEX sync_download_idx_station_id ON sync_download (station_id);
+
+        CREATE TABLE sync_upload (
+            id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+            station_id INTEGER NOT NULL REFERENCES station(id),
+            generation_id TEXT NOT NULL,
+            started DATETIME NOT NULL,
+            begin INTEGER NOT NULL,
+            end INTEGER NOT NULL,
+            finished DATETIME,
+            error TEXT
+        );
+
+        CREATE INDEX sync_upload_idx_station_id ON sync_upload (station_id);
         "#,
     )])
 }

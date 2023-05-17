@@ -51,7 +51,11 @@ impl Db {
         Ok(saved)
     }
 
-    pub fn merge_reply(&self, device_id: DeviceId, reply: query::HttpReply) -> Result<Station> {
+    pub fn merge_reply(
+        &self,
+        device_id: DeviceId,
+        reply: query::device::HttpReply,
+    ) -> Result<Station> {
         let incoming = http_reply_to_station(reply)?;
         assert_eq!(device_id, incoming.device_id);
         Ok(self.synchornize(incoming)?)
