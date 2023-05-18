@@ -37,22 +37,24 @@ async fn main() -> Result<()> {
         */
 
         let client = query::portal::Client::new()?;
-        let token = client
+        let tokens = client
             .login(LoginPayload {
                 email: std::env::var("FK_EMAIL")?,
                 password: std::env::var("FK_PASSWORD")?,
             })
             .await?;
 
-        let client = client.to_authenticated(token)?;
+        if let Some(tokens) = tokens {
+            let client = client.to_authenticated(tokens)?;
 
-        let ourselves = client.query_ourselves().await?;
+            let ourselves = client.query_ourselves().await?;
 
-        println!("{:?}", ourselves);
+            println!("{:?}", ourselves);
 
-        let transmission_token = client.issue_transmission_token().await?;
+            let transmission_token = client.issue_transmission_token().await?;
 
-        println!("{:?}", transmission_token);
+            println!("{:?}", transmission_token);
+        }
 
         panic!();
     }

@@ -62,15 +62,18 @@ impl Client {
             .build()?)
     }
 
-    pub async fn login(&self, login: LoginPayload) -> Result<Token> {
+    pub async fn login(&self, login: LoginPayload) -> Result<Option<Tokens>> {
         let req = self.build_post("/login", login).await?;
         let response = self.execute_req(req).await?;
 
         if let Some(auth) = response.headers().get("authorization") {
             let token = auth.to_str()?.to_owned();
-            Ok(Token(token))
+            Ok(Some(Tokens {
+                token,
+                refresh: None,
+            }))
         } else {
-            Err(PortalError::BadCredentials.into())
+            Ok(None)
         }
     }
 
@@ -82,7 +85,7 @@ impl Client {
         Ok(())
     }
 
-    pub fn to_authenticated(&self, token: Token) -> Result<AuthenticatedClient> {
+    pub fn to_authenticated(&self, token: Tokens) -> Result<AuthenticatedClient> {
         AuthenticatedClient::new(token)
     }
 }
@@ -93,9 +96,9 @@ pub struct AuthenticatedClient {
 }
 
 impl AuthenticatedClient {
-    pub fn new(token: Token) -> Result<Self> {
+    pub fn new(token: Tokens) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert("authorization", token.0.parse()?);
+        headers.insert("authorization", token.token.parse()?);
 
         Ok(Self {
             plain: Client::new_with_headers(headers)?,
@@ -115,9 +118,12 @@ impl AuthenticatedClient {
     }
 }
 
-pub struct Token(String);
+pub struct Tokens {
+    pub token: String,
+    pub refresh: Option<String>,
+}
 
-impl std::fmt::Debug for Token {
+impl std::fmt::Debug for Tokens {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("Token").field(&"SECRET").finish()
     }
