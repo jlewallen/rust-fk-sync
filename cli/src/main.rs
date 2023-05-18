@@ -1,4 +1,5 @@
 use anyhow::Result;
+use query::portal::LoginPayload;
 use std::sync::Arc;
 use tokio::{signal, sync::mpsc};
 use tracing::*;
@@ -28,11 +29,33 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    /*
-    const TEST_IP: [u8; 4] = [192, 168, 0, 205];
-    let client = query::Client::new()?;
-    let _status = client.query_status(TEST_IP.into()).await?;
-    */
+    if false {
+        /*
+        const TEST_IP: [u8; 4] = [192, 168, 0, 205];
+        let client = query::device::Client::new()?;
+        let _status = client.query_status(TEST_IP.into()).await?;
+        */
+
+        let client = query::portal::Client::new()?;
+        let token = client
+            .login(LoginPayload {
+                email: std::env::var("FK_EMAIL")?,
+                password: std::env::var("FK_PASSWORD")?,
+            })
+            .await?;
+
+        let client = client.to_authenticated(token)?;
+
+        let ourselves = client.query_ourselves().await?;
+
+        println!("{:?}", ourselves);
+
+        let transmission_token = client.issue_transmission_token().await?;
+
+        println!("{:?}", transmission_token);
+
+        panic!();
+    }
 
     let server = Arc::new(Server::default());
     let discovery = Discovery::default();
