@@ -17,11 +17,28 @@ pub enum ReplyMappingError {
     NoModule,
     #[error("No module")]
     NoSensor,
+    #[error("No power")]
+    NoPower,
+    #[error("No battery")]
+    NoBattery,
+    #[error("No solar")]
+    NoSolar,
 }
 
 pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingError> {
     let status = reply.status.ok_or(ReplyMappingError::NoStatus)?;
     let identity = status.identity.ok_or(ReplyMappingError::NoIdentity)?;
+    let streams: Vec<Stream> = reply
+        .streams
+        .iter()
+        .map(|stream| Stream {
+            size: stream.size,
+            records: stream.block,
+        })
+        .collect();
+    let power = status.power.ok_or(ReplyMappingError::NoPower)?;
+    let battery = power.battery.ok_or(ReplyMappingError::NoBattery)?;
+    let solar = power.solar.ok_or(ReplyMappingError::NoSolar)?;
 
     let device_id = DeviceId(hex::encode(identity.device_id));
     let generation_id = hex::encode(identity.generation_id);
@@ -43,10 +60,21 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
         name: identity.name.to_owned(),
         firmware: identity.firmware.to_owned(),
         last_seen: Utc::now(),
-        meta: Stream::default(),
-        data: Stream::default(),
-        battery: Battery::default(),
-        solar: Solar::default(),
+        meta: streams
+            .get(1)
+            .map(|s| s.clone())
+            .unwrap_or(Stream::default()),
+        data: streams
+            .get(0)
+            .map(|s| s.clone())
+            .unwrap_or(Stream::default()),
+        battery: Battery {
+            percentage: battery.percentage as f32,
+            voltage: battery.voltage as f32,
+        },
+        solar: Solar {
+            voltage: solar.voltage as f32,
+        },
         status: None,
         modules,
     })
