@@ -49,6 +49,10 @@ impl Client {
 
         Ok(data)
     }
+
+    pub async fn configure(&self, _addr: &str, _query: HttpQuery) -> Result<HttpReply> {
+        todo!()
+    }
 }
 
 pub fn parse_http_reply(data: &[u8]) -> Result<HttpReply> {
