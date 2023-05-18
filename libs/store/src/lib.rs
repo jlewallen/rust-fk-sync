@@ -469,6 +469,113 @@ impl Db {
         Ok(sensors.map(|r| Ok(r?)).collect::<Result<Vec<_>>>()?)
     }
 
+    pub fn add_station_download(&self, download: &StationDownload) -> Result<StationDownload> {
+        let conn = self.require_opened()?;
+        let mut stmt = conn.prepare(
+            r#"
+            INSERT INTO station_download
+            (station_id, generation_id, started, begin, end, path, uploaded, finished, size, error) VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )?;
+
+        let affected = stmt.execute(params![
+            download.station_id,
+            download.generation_id,
+            download.started.to_rfc3339(),
+            download.begin,
+            download.end,
+            download.path,
+            download.uploaded,
+            download.finished.map(|f| f.to_rfc3339()),
+            download.size,
+            download.error
+        ])?;
+
+        assert_eq!(affected, 1);
+
+        let id = Some(conn.last_insert_rowid());
+
+        Ok(StationDownload {
+            id,
+            station_id: download.station_id,
+            generation_id: download.generation_id.clone(),
+            started: download.started,
+            begin: download.begin,
+            end: download.end,
+            path: download.path.clone(),
+            uploaded: download.uploaded,
+            finished: download.finished,
+            size: download.size,
+            error: download.error.clone(),
+        })
+    }
+
+    pub fn update_station_download(&self, download: &StationDownload) -> Result<StationDownload> {
+        let conn = self.require_opened()?;
+        let mut stmt = conn.prepare(
+            r#"
+            UPDATE station_download SET
+                station_id = ?, generation_id = ?, started = ?, begin = ?, end = ?,
+                path = ?, uploaded = ?, finished = ?, size = ?, error = ?
+            WHERE id = ?"#,
+        )?;
+
+        let affected = stmt.execute(params![
+            download.station_id,
+            download.generation_id,
+            download.started.to_rfc3339(),
+            download.begin,
+            download.end,
+            download.path,
+            download.uploaded,
+            download.finished.map(|f| f.to_rfc3339()),
+            download.size,
+            download.error,
+            download.id
+        ])?;
+
+        assert_eq!(affected, 1);
+
+        Ok(download.clone())
+    }
+
+    pub fn get_station_downloads(&self, station_id: i64) -> Result<Vec<StationDownload>> {
+        let mut stmt = self.require_opened()?.prepare(
+            r#"SELECT id, station_id, generation_id, started, begin, end, path, uploaded, finished, size, error, id
+               FROM station_download WHERE station_id = ?"#,
+        )?;
+
+        let downloads = stmt.query_map(params![station_id], |row| {
+            let started: String = row.get(3)?;
+            let started = DateTime::parse_from_rfc3339(&started)
+                .expect("Parsing started")
+                .with_timezone(&Utc);
+            let finished: Option<String> = row.get(8)?;
+            let finished = finished.map(|f| {
+                DateTime::parse_from_rfc3339(&f)
+                    .expect("Parsing finished")
+                    .with_timezone(&Utc)
+            });
+
+            Ok(StationDownload {
+                id: row.get(0)?,
+                station_id: row.get(1)?,
+                generation_id: row.get(2)?,
+                started,
+                begin: row.get(4)?,
+                end: row.get(5)?,
+                path: row.get(6)?,
+                uploaded: row.get(7)?,
+                finished,
+                size: row.get(9)?,
+                error: row.get(10)?,
+            })
+        })?;
+
+        Ok(downloads.map(|r| Ok(r?)).collect::<Result<Vec<_>>>()?)
+    }
+
     pub fn require_opened(&self) -> Result<&Connection> {
         match &self.conn {
             Some(conn) => Ok(conn),
@@ -709,6 +816,57 @@ mod tests {
 
         assert_eq!(first.id, second.id);
         assert_eq!(second.modules.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_adding_new_station_download() -> Result<()> {
+        let mut db = Db::new();
+        db.open()?;
+
+        let station = db.add_station(&build().station().build())?;
+        let adding = build().download().station_id(station.id).build();
+        let added = db.add_station_download(&adding)?;
+        assert_ne!(added.id, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_querying_station_downloads() -> Result<()> {
+        let mut db = Db::new();
+        db.open()?;
+
+        let station = db.add_station(&build().station().build())?;
+        let adding = build().download().station_id(station.id).build();
+        db.add_station_download(&adding)?;
+
+        let stations = db.get_station_downloads(station.id.unwrap())?;
+        assert_eq!(stations.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_updating_station_download() -> Result<()> {
+        let mut db = Db::new();
+        db.open()?;
+
+        let station = db.add_station(&build().station().build())?;
+        let adding = build().download().station_id(station.id).build();
+        let mut added = db.add_station_download(&adding)?;
+
+        let stations = db.get_station_downloads(station.id.unwrap())?;
+        assert_eq!(stations.len(), 1);
+        assert!(stations.get(0).unwrap().finished.is_none());
+
+        added.finished = Some(Utc::now());
+        db.update_station_download(&added)?;
+
+        let stations = db.get_station_downloads(station.id.unwrap())?;
+        assert_eq!(stations.len(), 1);
+        assert!(stations.get(0).unwrap().finished.is_some());
 
         Ok(())
     }

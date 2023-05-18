@@ -78,6 +78,21 @@ pub struct LiveValue {
     pub uncalibrated: f32,
 }
 
+#[derive(Clone, Debug)]
+pub struct StationDownload {
+    pub id: Option<i64>,
+    pub station_id: Option<i64>,
+    pub generation_id: String,
+    pub started: DateTime<Utc>,
+    pub begin: u64,
+    pub end: u64,
+    pub path: String,
+    pub uploaded: bool,
+    pub finished: Option<DateTime<Utc>>,
+    pub size: Option<i64>,
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) mod test {
@@ -101,6 +116,10 @@ pub(crate) mod test {
 
         pub fn sensor(&self) -> BuildSensor {
             BuildSensor::default()
+        }
+
+        pub fn download(&self) -> BuildDownload {
+            BuildDownload::default()
         }
     }
 
@@ -257,6 +276,34 @@ pub(crate) mod test {
                     uncalibrated: 1200.0,
                 }),
                 removed: false,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    pub struct BuildDownload {
+        station_id: Option<i64>,
+    }
+
+    impl BuildDownload {
+        pub fn station_id(mut self, station_id: Option<i64>) -> Self {
+            self.station_id = station_id;
+            self
+        }
+
+        pub fn build(self) -> StationDownload {
+            StationDownload {
+                id: None,
+                station_id: self.station_id,
+                generation_id: "generation-id".to_owned(),
+                started: Utc::now(),
+                begin: 0,
+                end: 1000,
+                path: "downloaded-data-0.fkpb".to_owned(),
+                uploaded: false,
+                finished: None,
+                size: None,
+                error: None,
             }
         }
     }
