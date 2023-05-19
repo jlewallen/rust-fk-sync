@@ -1,4 +1,5 @@
 use anyhow::Result;
+use base64::{engine::general_purpose, Engine};
 use reqwest::{header::HeaderMap, Request, Response};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -163,6 +164,32 @@ pub struct TransmissionToken {
     pub url: String,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct DecodedToken {
+    pub email: String,
+    pub exp: u64,
+    pub iat: u64,
+    pub refresh_token: String,
+    pub scopes: Vec<String>,
+    pub sub: u64,
+}
+
+pub fn decode_token(token: &str) -> Result<DecodedToken, PortalError> {
+    // Sorry, not sorry.
+    token
+        .split(".")
+        .skip(1)
+        .take(1)
+        .map(|p| Ok(std::str::from_utf8(&general_purpose::STANDARD_NO_PAD.decode(p)?)?.to_owned()))
+        .collect::<Result<Vec<_>, PortalError>>()?
+        .into_iter()
+        .map(|p| Ok(serde_json::from_str::<DecodedToken>(p.as_str())?))
+        .collect::<Result<Vec<_>, PortalError>>()?
+        .into_iter()
+        .next()
+        .ok_or(PortalError::UnexpectedError)
+}
+
 #[derive(Error, Debug)]
 pub enum PortalError {
     #[error("HTTP error")]
@@ -173,4 +200,12 @@ pub enum PortalError {
     ConversionError(#[from] ToStrError),
     #[error("HTTP status error")]
     HttpStatus(StatusCode),
+    #[error("Base 64 error")]
+    Base64Error(#[from] base64::DecodeError),
+    #[error("UTF 8 error")]
+    Utf8Error(#[from] std::str::Utf8Error),
+    #[error("JSON error")]
+    JsonError(#[from] serde_json::Error),
+    #[error("Unexpected error")]
+    UnexpectedError,
 }
