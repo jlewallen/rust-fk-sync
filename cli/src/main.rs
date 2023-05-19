@@ -1,5 +1,5 @@
 use anyhow::Result;
-use query::portal::LoginPayload;
+use query::portal::{LoginPayload, PortalError, Tokens};
 use std::sync::Arc;
 use tokio::{signal, sync::mpsc};
 use tracing::*;
@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    if false {
+    if true {
         /*
         const TEST_IP: [u8; 4] = [192, 168, 0, 205];
         let client = query::device::Client::new()?;
@@ -45,6 +45,16 @@ async fn main() -> Result<()> {
             .await?;
 
         if let Some(tokens) = tokens {
+            let broken_client = client.to_authenticated(Tokens {
+                token: "INVALID".to_string(),
+                refresh: None,
+            })?;
+            match broken_client.query_ourselves().await {
+                Ok(_) => panic!("Whoa, how'd that happen?"),
+                Err(PortalError::HttpStatus(status)) => info!("http status: {:?}", status),
+                Err(e) => info!("{:?}", e),
+            };
+
             let client = client.to_authenticated(tokens)?;
 
             let ourselves = client.query_ourselves().await?;

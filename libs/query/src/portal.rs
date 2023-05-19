@@ -5,6 +5,8 @@ use std::time::Duration;
 use thiserror::Error;
 use tracing::debug;
 
+pub use reqwest::{header::InvalidHeaderValue, header::ToStrError, StatusCode};
+
 #[derive(Debug)]
 pub struct Client {
     base_url: String,
@@ -12,11 +14,11 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> Result<Self, PortalError> {
         Self::new_with_headers(HeaderMap::new())
     }
 
-    pub fn new_with_headers(mut headers: HeaderMap) -> Result<Self> {
+    pub fn new_with_headers(mut headers: HeaderMap) -> Result<Self, PortalError> {
         let sdk_version = std::env!("CARGO_PKG_VERSION");
         let user_agent = format!("rustfk ({})", sdk_version);
         headers.insert("user-agent", user_agent.parse()?);
@@ -32,17 +34,23 @@ impl Client {
         Ok(Self { base_url, client })
     }
 
-    async fn execute_req(&self, req: Request) -> Result<Response> {
+    async fn execute_req(&self, req: Request) -> Result<Response, PortalError> {
         let url = req.url().clone();
         debug!("{} querying", &url);
 
         let response = self.client.execute(req).await?;
-        debug!("{} done querying", &url);
 
-        Ok(response)
+        let status = response.status();
+        debug!("{} done querying ({:?})", &url, status);
+
+        if status.is_success() {
+            Ok(response)
+        } else {
+            Err(PortalError::HttpStatus(status))
+        }
     }
 
-    async fn build_get(&self, path: &str) -> Result<Request> {
+    async fn build_get(&self, path: &str) -> Result<Request, PortalError> {
         Ok(self
             .client
             .get(&format!("{}{}", self.base_url, path))
@@ -50,7 +58,7 @@ impl Client {
             .build()?)
     }
 
-    async fn build_post<T>(&self, path: &str, payload: T) -> Result<Request>
+    async fn build_post<T>(&self, path: &str, payload: T) -> Result<Request, PortalError>
     where
         T: Serialize,
     {
@@ -62,7 +70,7 @@ impl Client {
             .build()?)
     }
 
-    pub async fn login(&self, login: LoginPayload) -> Result<Option<Tokens>> {
+    pub async fn login(&self, login: LoginPayload) -> Result<Option<Tokens>, PortalError> {
         let req = self.build_post("/login", login).await?;
         let response = self.execute_req(req).await?;
 
@@ -77,7 +85,7 @@ impl Client {
         }
     }
 
-    pub async fn query_status(&self) -> Result<()> {
+    pub async fn query_status(&self) -> Result<(), PortalError> {
         let req = self.build_get("/status").await?;
         let response = self.execute_req(req).await?;
         let _bytes = response.bytes().await?;
@@ -85,7 +93,7 @@ impl Client {
         Ok(())
     }
 
-    pub fn to_authenticated(&self, token: Tokens) -> Result<AuthenticatedClient> {
+    pub fn to_authenticated(&self, token: Tokens) -> Result<AuthenticatedClient, PortalError> {
         AuthenticatedClient::new(token)
     }
 }
@@ -96,7 +104,7 @@ pub struct AuthenticatedClient {
 }
 
 impl AuthenticatedClient {
-    pub fn new(token: Tokens) -> Result<Self> {
+    pub fn new(token: Tokens) -> Result<Self, PortalError> {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", token.token.parse()?);
 
@@ -105,13 +113,13 @@ impl AuthenticatedClient {
         })
     }
 
-    pub async fn query_ourselves(&self) -> Result<User> {
+    pub async fn query_ourselves(&self) -> Result<User, PortalError> {
         let req = self.plain.build_get("/user").await?;
         let response = self.plain.execute_req(req).await?;
         Ok(response.json().await?)
     }
 
-    pub async fn issue_transmission_token(&self) -> Result<TransmissionToken> {
+    pub async fn issue_transmission_token(&self) -> Result<TransmissionToken, PortalError> {
         let req = self.plain.build_get("/user/transmission-token").await?;
         let response = self.plain.execute_req(req).await?;
         Ok(response.json().await?)
@@ -157,6 +165,12 @@ pub struct TransmissionToken {
 
 #[derive(Error, Debug)]
 pub enum PortalError {
-    #[error("Bad credentials")]
-    BadCredentials,
+    #[error("HTTP error")]
+    Request(#[from] reqwest::Error),
+    #[error("Invalid header value")]
+    InvalidHeaderValue(#[from] InvalidHeaderValue),
+    #[error("Conversion error")]
+    ConversionError(#[from] ToStrError),
+    #[error("HTTP status error")]
+    HttpStatus(StatusCode),
 }
