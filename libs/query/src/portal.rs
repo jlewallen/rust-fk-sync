@@ -2,6 +2,7 @@ use anyhow::Result;
 use base64::{engine::general_purpose, Engine};
 use reqwest::{header::HeaderMap, Request, Response};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::debug;
@@ -71,10 +72,7 @@ impl Client {
             .build()?)
     }
 
-    pub async fn login(&self, login: LoginPayload) -> Result<Option<Tokens>, PortalError> {
-        let req = self.build_post("/login", login).await?;
-        let response = self.execute_req(req).await?;
-
+    fn response_to_tokens(&self, response: Response) -> Result<Option<Tokens>, PortalError> {
         if let Some(auth) = response.headers().get("authorization") {
             let token = auth.to_str()?.to_owned();
             Ok(Some(Tokens {
@@ -86,12 +84,31 @@ impl Client {
         }
     }
 
+    pub async fn login(&self, login: LoginPayload) -> Result<Option<Tokens>, PortalError> {
+        let req = self.build_post("/login", login).await?;
+        let response = self.execute_req(req).await?;
+
+        self.response_to_tokens(response)
+    }
+
     pub async fn query_status(&self) -> Result<(), PortalError> {
         let req = self.build_get("/status").await?;
         let response = self.execute_req(req).await?;
         let _bytes = response.bytes().await?;
 
         Ok(())
+    }
+
+    pub async fn use_refresh_token(
+        &self,
+        refresh_token: &str,
+    ) -> Result<Option<Tokens>, PortalError> {
+        let req = self
+            .build_post("/refresh", json!({ refresh_token: refresh_token }))
+            .await?;
+        let response = self.execute_req(req).await?;
+
+        self.response_to_tokens(response)
     }
 
     pub fn to_authenticated(&self, token: Tokens) -> Result<AuthenticatedClient, PortalError> {
