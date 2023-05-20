@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, TimeZone, Utc};
 use thiserror::Error;
 
 use crate::model::*;
@@ -47,9 +47,10 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
         .live_readings
         .iter()
         .flat_map(|r| {
-            r.modules
-                .iter()
-                .map(|m| Ok(to_module_with_live_readings(&m)?))
+            r.modules.iter().map(|m| {
+                let time = Utc.timestamp_millis_opt(r.time as i64 * 1000).unwrap();
+                Ok(to_module_with_live_readings(&m, time)?)
+            })
         })
         .collect::<Result<Vec<_>, ReplyMappingError>>()?;
 
@@ -82,11 +83,12 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
 
 fn to_module_with_live_readings(
     m: &query::device::LiveModuleReadings,
+    time: DateTime<Utc>,
 ) -> Result<Module, ReplyMappingError> {
     let sensors = m
         .readings
         .iter()
-        .map(|sc| Ok(to_sensor_with_live_readings(sc)?))
+        .map(|sc| Ok(to_sensor_with_live_readings(sc, time.clone())?))
         .collect::<Result<Vec<_>, ReplyMappingError>>()?;
 
     to_module(
@@ -131,8 +133,10 @@ fn to_module(
 
 fn to_sensor_with_live_readings(
     s: &query::device::LiveSensorReading,
+    time: DateTime<Utc>,
 ) -> Result<Sensor, ReplyMappingError> {
     let value = Some(LiveValue {
+        time,
         value: s.value,
         uncalibrated: s.uncalibrated,
     });

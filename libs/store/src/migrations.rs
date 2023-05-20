@@ -48,6 +48,7 @@ pub(crate) fn get_migrations<'m>() -> Migrations<'m> {
             key TEXT NOT NULL,
             calibrated_uom TEXT NOT NULL,
             uncalibrated_uom TEXT NOT NULL,
+            reading_time DATETIME,
             calibrated_value REAL,
             uncalibrated_value REAL,
             removed BOOL NOT NULL

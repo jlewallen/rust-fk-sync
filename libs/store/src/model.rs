@@ -74,6 +74,7 @@ pub struct Sensor {
 
 #[derive(Clone, Debug)]
 pub struct LiveValue {
+    pub time: DateTime<Utc>,
     pub value: f32,
     pub uncalibrated: f32,
 }
@@ -217,6 +218,7 @@ pub(crate) mod test {
                 calibrated_uom: "m".to_owned(),
                 uncalibrated_uom: "mV".to_owned(),
                 value: Some(LiveValue {
+                    time: Utc::now(),
                     value: 3.14159,
                     uncalibrated: 1200.0,
                 }),
@@ -272,6 +274,7 @@ pub(crate) mod test {
                 calibrated_uom: "m".to_owned(),
                 uncalibrated_uom: "mV".to_owned(),
                 value: Some(LiveValue {
+                    time: Utc::now(),
                     value: 3.14159,
                     uncalibrated: 1200.0,
                 }),

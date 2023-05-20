@@ -374,8 +374,8 @@ impl Db {
         let mut stmt = conn.prepare(
             r#"
             INSERT INTO sensor
-            (module_id, number, flags, key, calibrated_uom, uncalibrated_uom, calibrated_value, uncalibrated_value, removed) VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (module_id, number, flags, key, calibrated_uom, uncalibrated_uom, reading_time, calibrated_value, uncalibrated_value, removed) VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )?;
 
@@ -386,6 +386,7 @@ impl Db {
             sensor.key,
             sensor.calibrated_uom,
             sensor.uncalibrated_uom,
+            sensor.value.as_ref().map(|v| v.time.to_rfc3339()),
             sensor.value.as_ref().map(|v| v.value),
             sensor.value.as_ref().map(|v| v.uncalibrated),
             sensor.removed
@@ -415,7 +416,7 @@ impl Db {
         let conn = self.require_opened()?;
         let mut stmt = conn.prepare(
             r#"
-            UPDATE sensor SET number = ?, flags = ?, key = ?, calibrated_uom = ?, uncalibrated_uom = ?, calibrated_value = ?, uncalibrated_value = ?, removed = ? WHERE id = ?
+            UPDATE sensor SET number = ?, flags = ?, key = ?, calibrated_uom = ?, uncalibrated_uom = ?, reading_time = ?, calibrated_value = ?, uncalibrated_value = ?, removed = ? WHERE id = ?
             "#,
         )?;
 
@@ -425,6 +426,7 @@ impl Db {
             sensor.key,
             sensor.calibrated_uom,
             sensor.uncalibrated_uom,
+            sensor.value.as_ref().map(|v| v.time.to_rfc3339()),
             sensor.value.as_ref().map(|v| v.value),
             sensor.value.as_ref().map(|v| v.uncalibrated),
             sensor.removed,
@@ -438,15 +440,23 @@ impl Db {
 
     pub fn get_sensors(&self, module_id: i64) -> Result<Vec<Sensor>> {
         let mut stmt = self.require_opened()?.prepare(
-            r#"SELECT id, module_id, number, flags, key, calibrated_uom, uncalibrated_uom, calibrated_value, uncalibrated_value, removed
+            r#"SELECT id, module_id, number, flags, key, calibrated_uom, uncalibrated_uom, reading_time, calibrated_value, uncalibrated_value, removed
                FROM sensor WHERE module_id = ?"#,
         )?;
 
         let sensors = stmt.query_map(params![module_id], |row| {
-            let calibrated_value: Option<f32> = row.get(7)?;
-            let uncalibrated_value: Option<f32> = row.get(8)?;
-            let value = match (calibrated_value, uncalibrated_value) {
-                (Some(calibrated), Some(uncalibrated)) => Some(LiveValue {
+            let reading_time: Option<String> = row.get(7)?;
+            let reading_time = reading_time.map(|r| {
+                DateTime::parse_from_rfc3339(&r)
+                    .expect("Parsing reading_time")
+                    .with_timezone(&Utc)
+            });
+
+            let calibrated_value: Option<f32> = row.get(8)?;
+            let uncalibrated_value: Option<f32> = row.get(9)?;
+            let value = match (reading_time, calibrated_value, uncalibrated_value) {
+                (Some(reading_time), Some(calibrated), Some(uncalibrated)) => Some(LiveValue {
+                    time: reading_time,
                     value: calibrated,
                     uncalibrated,
                 }),
@@ -461,7 +471,7 @@ impl Db {
                 key: row.get(4)?,
                 calibrated_uom: row.get(5)?,
                 uncalibrated_uom: row.get(6)?,
-                removed: row.get(9)?,
+                removed: row.get(10)?,
                 value,
             })
         })?;
