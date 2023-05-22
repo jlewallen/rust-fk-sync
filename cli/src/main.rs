@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use query::portal::{LoginPayload, PortalError, Tokens};
 use std::sync::Arc;
 use tokio::{signal, sync::mpsc};
@@ -7,6 +8,20 @@ use tracing_subscriber::prelude::*;
 
 use discovery::{Discovered, Discovery};
 use sync::Server;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    QueryDevice,
+    QueryPortal,
+    Sync,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,67 +44,75 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    if true {
-        /*
-        const TEST_IP: [u8; 4] = [192, 168, 0, 205];
-        let client = query::device::Client::new()?;
-        let _status = client.query_status(TEST_IP.into()).await?;
-        */
+    let cli = Cli::parse();
 
-        let client = query::portal::Client::new()?;
-        let tokens = client
-            .login(LoginPayload {
-                email: std::env::var("FK_EMAIL")?,
-                password: std::env::var("FK_PASSWORD")?,
-            })
-            .await?;
+    match cli.command {
+        Some(Commands::QueryPortal) => {
+            let client = query::portal::Client::new()?;
+            let tokens = client
+                .login(LoginPayload {
+                    email: std::env::var("FK_EMAIL")?,
+                    password: std::env::var("FK_PASSWORD")?,
+                })
+                .await?;
 
-        if let Some(tokens) = tokens {
-            let broken_client = client.to_authenticated(Tokens {
-                token: "INVALID".to_string(),
-                refresh: None,
-            })?;
-            match broken_client.query_ourselves().await {
-                Ok(_) => panic!("Whoa, how'd that happen?"),
-                Err(PortalError::HttpStatus(status)) => info!("http status: {:?}", status),
-                Err(e) => info!("{:?}", e),
-            };
+            if let Some(tokens) = tokens {
+                let broken_client = client.to_authenticated(Tokens {
+                    token: "INVALID".to_string(),
+                    refresh: None,
+                })?;
+                match broken_client.query_ourselves().await {
+                    Ok(_) => panic!("Whoa, how'd that happen?"),
+                    Err(PortalError::HttpStatus(status)) => info!("http status: {:?}", status),
+                    Err(e) => info!("{:?}", e),
+                };
 
-            let client = client.to_authenticated(tokens)?;
+                let client = client.to_authenticated(tokens)?;
 
-            let ourselves = client.query_ourselves().await?;
+                let ourselves = client.query_ourselves().await?;
 
-            println!("{:?}", ourselves);
+                println!("{:?}", ourselves);
 
-            let transmission_token = client.issue_transmission_token().await?;
+                let transmission_token = client.issue_transmission_token().await?;
 
-            println!("{:?}", transmission_token);
-        }
-
-        panic!();
-    }
-
-    let server = Arc::new(Server::default());
-    let discovery = Discovery::default();
-    let (tx, mut rx) = mpsc::channel::<Discovered>(32);
-
-    let pump = tokio::spawn({
-        let server = server.clone();
-        async move {
-            while let Some(d) = rx.recv().await {
-                info!("{:?}", d);
-                server.sync(d).await.expect("error initiating sync");
+                println!("{:?}", transmission_token);
             }
-        }
-    });
 
-    #[allow(clippy::unit_arg)]
-    Ok(tokio::select! {
-        _ = discovery.run(tx) => {},
-        _ = server.run() => {},
-        _ = pump => {},
-        res = signal::ctrl_c() => {
-            return res.map_err(|e| e.into())
-        },
-    })
+            Ok(())
+        }
+        Some(Commands::QueryDevice) => {
+            let client = query::device::Client::new()?;
+            let status = client.query_status("192.168.0.205").await?;
+
+            info!("{:?}", status);
+
+            Ok(())
+        }
+        Some(Commands::Sync) => {
+            let server = Arc::new(Server::default());
+            let discovery = Discovery::default();
+            let (tx, mut rx) = mpsc::channel::<Discovered>(32);
+
+            let pump = tokio::spawn({
+                let server = server.clone();
+                async move {
+                    while let Some(d) = rx.recv().await {
+                        info!("{:?}", d);
+                        server.sync(d).await.expect("error initiating sync");
+                    }
+                }
+            });
+
+            #[allow(clippy::unit_arg)]
+            Ok(tokio::select! {
+                _ = discovery.run(tx) => {},
+                _ = server.run() => {},
+                _ = pump => {},
+                res = signal::ctrl_c() => {
+                    return res.map_err(|e| e.into())
+                },
+            })
+        }
+        _ => Ok(()),
+    }
 }
