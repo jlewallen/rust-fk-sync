@@ -96,8 +96,12 @@ async fn main() -> Result<()> {
                 let server = server.clone();
                 async move {
                     while let Some(d) = rx.recv().await {
-                        info!("{:?}", d);
-                        server.sync(d).await.expect("error initiating sync");
+                        if d.http_addr.port() == 80 || d.http_addr.port() == 0 {
+                            info!("{:?}", d);
+                            server.sync(d).await.expect("error initiating sync");
+                        } else {
+                            debug!("{:?} (ignored)", d);
+                        }
                     }
                 }
             });
