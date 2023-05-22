@@ -59,7 +59,6 @@ async fn main() -> Result<()> {
             if let Some(tokens) = tokens {
                 let broken_client = client.to_authenticated(Tokens {
                     token: "INVALID".to_string(),
-                    refresh: None,
                 })?;
                 match broken_client.query_ourselves().await {
                     Ok(_) => panic!("Whoa, how'd that happen?"),

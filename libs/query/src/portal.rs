@@ -75,10 +75,7 @@ impl Client {
     fn response_to_tokens(&self, response: Response) -> Result<Option<Tokens>, PortalError> {
         if let Some(auth) = response.headers().get("authorization") {
             let token = auth.to_str()?.to_owned();
-            Ok(Some(Tokens {
-                token,
-                refresh: None,
-            }))
+            Ok(Some(Tokens { token }))
         } else {
             Ok(None)
         }
@@ -144,9 +141,9 @@ impl AuthenticatedClient {
     }
 }
 
+#[derive(Clone)]
 pub struct Tokens {
     pub token: String,
-    pub refresh: Option<String>,
 }
 
 impl std::fmt::Debug for Tokens {
@@ -175,7 +172,7 @@ pub struct Photo {
     pub url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct TransmissionToken {
     pub token: String,
     pub url: String,
