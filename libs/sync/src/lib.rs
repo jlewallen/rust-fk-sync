@@ -392,66 +392,16 @@ impl Server {
             *locked = Some(tx.clone());
             async move {
                 while let Some(cmd) = rx.recv().await {
-                    match &cmd {
-                        ServerCommand::Discovered(discovered) => {
-                            let entry = devices.entry(discovered.device_id.clone());
-                            let entry = entry.or_insert_with(|| {
-                                ConnectedDevice::new(
-                                    discovered.device_id.clone(),
-                                    discovered.udp_addr,
-                                )
-                            });
-
-                            device_id_by_addr
-                                .entry(discovered.udp_addr)
-                                .or_insert(discovered.device_id.clone());
-
-                            if let Some(message) = entry.tick() {
-                                transmit(&sending, &discovered.udp_addr, &message)
-                                    .await
-                                    .expect("send failed");
-                            }
-                        }
-                        ServerCommand::Received(addr, message) => {
-                            message.log_received();
-
-                            if let Some(device_id) = device_id_by_addr.get(addr) {
-                                match devices.get_mut(device_id) {
-                                    Some(connected) => {
-                                        let reply = connected
-                                            .handle(message)
-                                            .expect("failed handling message");
-
-                                        if let Some(reply) = reply {
-                                            transmit(&sending, &addr, &reply)
-                                                .await
-                                                .expect("send failed");
-                                        }
-                                    }
-                                    None => todo!(),
-                                }
-                            };
-                        }
-                        ServerCommand::Tick => {
-                            for (device_id, addr) in devices
-                                .iter()
-                                .filter(|(_, connected)| connected.is_expired())
-                                .map(|(device_id, connected)| (device_id.clone(), connected.addr))
-                                .collect::<Vec<_>>()
-                            {
-                                info!("{:?}@{:?} expired", device_id, addr);
-                                device_id_by_addr.remove(&addr);
-                                devices.remove(&device_id);
-                            }
-
-                            for (_, connected) in devices.iter_mut() {
-                                if let Some(message) = connected.tick() {
-                                    transmit(&sending, &connected.addr, &message)
-                                        .await
-                                        .expect("send failed");
-                                }
-                            }
-                        }
+                    match handle_server_command(
+                        &cmd,
+                        &sending,
+                        &mut devices,
+                        &mut device_id_by_addr,
+                    )
+                    .await
+                    {
+                        Ok(_) => {}
+                        Err(e) => warn!("Server command error: {:?}", e),
                     }
                 }
             }
@@ -461,21 +411,11 @@ impl Server {
             let tx = tx.clone();
 
             async move {
-                let mut buffer = vec![0u8; 4096];
-
                 loop {
-                    let (len, addr) = receiving
-                        .recv_from(&mut buffer[..])
-                        .await
-                        .expect("recv failed");
-
-                    trace!("{} bytes from {}", len, addr);
-
-                    let message = Message::read(&buffer[0..len]).expect("parse failed");
-
-                    tx.send(ServerCommand::Received(addr, message))
-                        .await
-                        .expect("send self failed");
+                    match receive_and_process(&receiving, &tx).await {
+                        Ok(_) => {}
+                        Err(e) => warn!("Receive and process error: {:?}", e),
+                    }
                 }
             }
         });
@@ -486,9 +426,10 @@ impl Server {
             loop {
                 interval.tick().await;
 
-                tx.send(ServerCommand::Tick)
-                    .await
-                    .expect("send self failed");
+                match tx.send(ServerCommand::Tick).await {
+                    Err(e) => warn!("Tick error: {:?}", e),
+                    Ok(_) => {}
+                }
             }
         });
 
@@ -521,7 +462,85 @@ impl Server {
     }
 }
 
-async fn transmit<A>(tx: &Arc<UdpSocket>, addr: &A, m: &Message) -> Result<()>
+async fn handle_server_command(
+    cmd: &ServerCommand,
+    sending: &UdpSocket,
+    devices: &mut HashMap<DeviceId, ConnectedDevice>,
+    device_id_by_addr: &mut HashMap<SocketAddr, DeviceId>,
+) -> Result<()> {
+    match cmd {
+        ServerCommand::Discovered(discovered) => {
+            let entry = devices.entry(discovered.device_id.clone());
+            let entry = entry.or_insert_with(|| {
+                ConnectedDevice::new(discovered.device_id.clone(), discovered.udp_addr)
+            });
+
+            device_id_by_addr
+                .entry(discovered.udp_addr)
+                .or_insert(discovered.device_id.clone());
+
+            if let Some(message) = entry.tick() {
+                transmit(sending, &discovered.udp_addr, &message)
+                    .await
+                    .expect("send failed");
+            }
+        }
+        ServerCommand::Received(addr, message) => {
+            message.log_received();
+
+            if let Some(device_id) = device_id_by_addr.get(addr) {
+                match devices.get_mut(device_id) {
+                    Some(connected) => {
+                        let reply = connected.handle(message).expect("failed handling message");
+
+                        if let Some(reply) = reply {
+                            transmit(sending, &addr, &reply).await.expect("send failed");
+                        }
+                    }
+                    None => todo!(),
+                }
+            };
+        }
+        ServerCommand::Tick => {
+            for (device_id, addr) in devices
+                .iter()
+                .filter(|(_, connected)| connected.is_expired())
+                .map(|(device_id, connected)| (device_id.clone(), connected.addr))
+                .collect::<Vec<_>>()
+            {
+                info!("{:?}@{:?} expired", device_id, addr);
+                device_id_by_addr.remove(&addr);
+                devices.remove(&device_id);
+            }
+
+            for (_, connected) in devices.iter_mut() {
+                if let Some(message) = connected.tick() {
+                    transmit(&sending, &connected.addr, &message)
+                        .await
+                        .expect("send failed");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn receive_and_process(receiving: &UdpSocket, tx: &Sender<ServerCommand>) -> Result<()> {
+    let mut buffer = vec![0u8; 4096];
+
+    let (len, addr) = receiving.recv_from(&mut buffer[..]).await?;
+
+    trace!("{} bytes from {}", len, addr);
+
+    let message = Message::read(&buffer[0..len])?;
+
+    tx.send(ServerCommand::Received(addr, message)).await?;
+
+    Ok(())
+}
+
+async fn transmit<A>(tx: &UdpSocket, addr: &A, m: &Message) -> Result<()>
 where
     A: ToSocketAddrs + std::fmt::Debug,
 {
