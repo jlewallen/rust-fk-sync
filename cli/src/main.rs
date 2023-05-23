@@ -119,11 +119,13 @@ async fn main() -> Result<()> {
                 let server = server.clone();
                 async move {
                     while let Some(d) = rx.recv().await {
-                        if d.http_addr.port() == 80 || d.http_addr.port() == 0 {
-                            info!("{:?}", d);
-                            server.sync(d).await.expect("error initiating sync");
-                        } else {
-                            debug!("{:?} (ignored)", d);
+                        if let Some(http_addr) = d.http_addr {
+                            if http_addr.port() == 80 || http_addr.port() == 0 {
+                                info!("{:?}", d);
+                                server.sync(d).await.expect("error initiating sync");
+                            } else {
+                                debug!("{:?} (ignored)", d);
+                            }
                         }
                     }
                 }
@@ -139,12 +141,16 @@ async fn main() -> Result<()> {
                             server
                                 .sync(Discovered {
                                     device_id: DeviceId(device_id),
-                                    http_addr: format!("{}:80", ip)
-                                        .parse()
-                                        .expect("Parsing http_addr failed"),
-                                    udp_addr: format!("{}:22144", ip)
-                                        .parse()
-                                        .expect("Parsing udp_addr failed"),
+                                    http_addr: Some(
+                                        format!("{}:80", ip)
+                                            .parse()
+                                            .expect("Parsing http_addr failed"),
+                                    ),
+                                    udp_addr: Some(
+                                        format!("{}:22144", ip)
+                                            .parse()
+                                            .expect("Parsing udp_addr failed"),
+                                    ),
                                 })
                                 .await
                                 .expect("error initiating sync");

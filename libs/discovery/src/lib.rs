@@ -17,13 +17,13 @@ pub struct DeviceId(pub String);
 #[derive(Clone, Debug)]
 pub struct Discovered {
     pub device_id: DeviceId,
-    pub http_addr: SocketAddr,
-    pub udp_addr: SocketAddr,
+    pub http_addr: Option<SocketAddr>,
+    pub udp_addr: Option<SocketAddr>,
 }
 
 impl Discovered {
-    pub fn http_url(&self) -> String {
-        format!("http://{}/fk/v1", self.http_addr)
+    pub fn http_url(&self) -> Option<String> {
+        self.http_addr.map(|addr| format!("http://{}/fk/v1", addr))
     }
 }
 
@@ -45,16 +45,10 @@ impl Discovery {
             let announced = Announce::parse(bytes)?;
             let discovered = Discovered {
                 device_id: announced.device_id().clone(),
-                http_addr: {
-                    let mut addr = addr;
-                    addr.set_port(announced.port());
-                    addr
-                },
-                udp_addr: {
-                    let mut addr = addr;
-                    addr.set_port(DEFAULT_UDP_SERVER_PORT);
-                    addr
-                },
+                http_addr: announced
+                    .port()
+                    .map(|port| SocketAddr::new(addr.ip(), port)),
+                udp_addr: { Some(SocketAddr::new(addr.ip(), DEFAULT_UDP_SERVER_PORT)) },
             };
 
             trace!("discovered {:?}", discovered);
@@ -133,10 +127,10 @@ impl Announce {
         }
     }
 
-    fn port(&self) -> u16 {
+    fn port(&self) -> Option<u16> {
         match self {
-            Announce::Hello(_, port) => *port,
-            Announce::Bye(_) => todo!(),
+            Announce::Hello(_, port) => Some(*port),
+            Announce::Bye(_) => None,
         }
     }
 }

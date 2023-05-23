@@ -498,17 +498,19 @@ async fn handle_server_command(
 ) -> Result<()> {
     match cmd {
         ServerCommand::Begin(discovered) => {
+            let udp_addr = discovered
+                .udp_addr
+                .ok_or(anyhow::anyhow!("Udp address is required"))?;
             let entry = devices.entry(discovered.device_id.clone());
-            let entry = entry.or_insert_with(|| {
-                ConnectedDevice::new(discovered.device_id.clone(), discovered.udp_addr)
-            });
+            let entry = entry
+                .or_insert_with(|| ConnectedDevice::new(discovered.device_id.clone(), udp_addr));
 
             device_id_by_addr
-                .entry(discovered.udp_addr)
+                .entry(udp_addr)
                 .or_insert(discovered.device_id.clone());
 
             if let Some(message) = entry.tick(publish).await? {
-                transmit(sending, &discovered.udp_addr, &message).await?;
+                transmit(sending, &udp_addr, &message).await?;
                 publish
                     .send(ServerEvent::Began(discovered.device_id.clone()))
                     .await?;
@@ -546,7 +548,6 @@ async fn handle_server_command(
                 info!("{:?}@{:?} expired", device_id, addr);
                 device_id_by_addr.remove(&addr);
                 devices.remove(&device_id);
-                // publish.send(ServerEvent::Failed(device_id.clone())).await?;
             }
 
             for (_, connected) in devices.iter_mut() {
