@@ -112,15 +112,15 @@ impl ConnectedDevice {
             .build()
     }
 
-    fn tick(&mut self) -> Option<Message> {
+    async fn tick(&mut self, publish: &Sender<ServerEvent>) -> Result<Option<Message>> {
         match &self.state {
             DeviceState::Discovered => {
                 self.received.clear();
                 self.transition(DeviceState::expecting(DeviceState::Learning));
 
-                Some(Message::Query)
+                Ok(Some(Message::Query))
             }
-            DeviceState::Failed => None,
+            DeviceState::Failed => Ok(None),
             _ => {
                 if self.is_stalled() {
                     if let Some(delay) = self.backoff.next_backoff() {
@@ -132,7 +132,7 @@ impl ConnectedDevice {
                         );
 
                         self.waiting_until = Some(Instant::now() + delay);
-                        self.query_requires()
+                        Ok(self.query_requires())
                     } else {
                         info!(
                             "{:?} FAILED {:?} {:?}",
@@ -143,10 +143,14 @@ impl ConnectedDevice {
 
                         self.transition(DeviceState::Failed);
 
-                        None
+                        publish
+                            .send(ServerEvent::Failed(self.device_id.clone()))
+                            .await?;
+
+                        Ok(None)
                     }
                 } else {
-                    None
+                    Ok(None)
                 }
             }
         }
@@ -368,30 +372,39 @@ enum HasGaps {
 
 #[derive(Debug)]
 pub enum ServerCommand {
-    Discovered(Discovered),
+    Begin(Discovered),
+    Cancel(DeviceId),
     Received(SocketAddr, Message),
     Tick,
 }
 
+#[derive(Debug)]
+pub enum ServerEvent {
+    Began(DeviceId),
+    Progress(DeviceId, Progress),
+    Completed(DeviceId),
+    Failed(DeviceId),
+}
+
 pub struct Server {
     port: u16,
+    publish: Sender<ServerEvent>,
     sender: Arc<Mutex<Option<Sender<ServerCommand>>>>,
 }
 
-impl Default for Server {
-    fn default() -> Self {
+impl Server {
+    pub fn new(publish: Sender<ServerEvent>) -> Self {
         Self {
             port: 22144,
+            publish,
             sender: Arc::new(Mutex::new(None)),
         }
     }
-}
-
-impl Server {
     pub async fn run(&self) -> Result<()> {
         let listening_addr = SocketAddrV4::new(IP_ALL.into(), self.port);
         let receiving = Arc::new(self.bind(&listening_addr)?);
         let sending = receiving.clone();
+        let publish = self.publish.clone();
 
         info!("listening on {}", listening_addr);
 
@@ -407,6 +420,7 @@ impl Server {
                     match handle_server_command(
                         &cmd,
                         &sending,
+                        &publish,
                         &mut devices,
                         &mut device_id_by_addr,
                     )
@@ -453,7 +467,7 @@ impl Server {
     }
 
     pub async fn sync(&self, discovered: Discovered) -> Result<()> {
-        self.send(ServerCommand::Discovered(discovered)).await
+        self.send(ServerCommand::Begin(discovered)).await
     }
 
     async fn send(&self, cmd: ServerCommand) -> Result<()> {
@@ -477,11 +491,12 @@ impl Server {
 async fn handle_server_command(
     cmd: &ServerCommand,
     sending: &UdpSocket,
+    publish: &Sender<ServerEvent>,
     devices: &mut HashMap<DeviceId, ConnectedDevice>,
     device_id_by_addr: &mut HashMap<SocketAddr, DeviceId>,
 ) -> Result<()> {
     match cmd {
-        ServerCommand::Discovered(discovered) => {
+        ServerCommand::Begin(discovered) => {
             let entry = devices.entry(discovered.device_id.clone());
             let entry = entry.or_insert_with(|| {
                 ConnectedDevice::new(discovered.device_id.clone(), discovered.udp_addr)
@@ -491,10 +506,11 @@ async fn handle_server_command(
                 .entry(discovered.udp_addr)
                 .or_insert(discovered.device_id.clone());
 
-            if let Some(message) = entry.tick() {
-                transmit(sending, &discovered.udp_addr, &message)
-                    .await
-                    .expect("send failed");
+            if let Some(message) = entry.tick(publish).await? {
+                transmit(sending, &discovered.udp_addr, &message).await?;
+                publish
+                    .send(ServerEvent::Began(discovered.device_id.clone()))
+                    .await?;
             }
         }
         ServerCommand::Received(addr, message) => {
@@ -503,10 +519,16 @@ async fn handle_server_command(
             if let Some(device_id) = device_id_by_addr.get(addr) {
                 match devices.get_mut(device_id) {
                     Some(connected) => {
-                        let reply = connected.handle(message).expect("failed handling message");
+                        let reply = connected.handle(message)?;
 
                         if let Some(reply) = reply {
-                            transmit(sending, &addr, &reply).await.expect("send failed");
+                            transmit(sending, &addr, &reply).await?;
+                        }
+
+                        if let Some(progress) = connected.progress() {
+                            publish
+                                .send(ServerEvent::Progress(device_id.clone(), progress))
+                                .await?;
                         }
                     }
                     None => todo!(),
@@ -523,14 +545,19 @@ async fn handle_server_command(
                 info!("{:?}@{:?} expired", device_id, addr);
                 device_id_by_addr.remove(&addr);
                 devices.remove(&device_id);
+                // publish.send(ServerEvent::Failed(device_id.clone())).await?;
             }
 
             for (_, connected) in devices.iter_mut() {
-                if let Some(message) = connected.tick() {
-                    transmit(&sending, &connected.addr, &message)
-                        .await
-                        .expect("send failed");
+                if let Some(message) = connected.tick(publish).await? {
+                    transmit(&sending, &connected.addr, &message).await?;
                 }
+            }
+        }
+        ServerCommand::Cancel(device_id) => {
+            if let Some(connected) = devices.remove_entry(device_id) {
+                device_id_by_addr.remove(&connected.1.addr);
+                publish.send(ServerEvent::Failed(device_id.clone())).await?;
             }
         }
     }

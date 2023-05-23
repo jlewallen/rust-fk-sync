@@ -7,7 +7,7 @@ use tracing::*;
 use tracing_subscriber::prelude::*;
 
 use discovery::{Discovered, Discovery};
-use sync::Server;
+use sync::{Server, ServerEvent};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -88,9 +88,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::Sync) => {
-            let server = Arc::new(Server::default());
+            let (transfer_publish, mut _transfer_events) = mpsc::channel::<ServerEvent>(32);
+            let server = Arc::new(Server::new(transfer_publish));
             let discovery = Discovery::default();
-            let (tx, mut rx) = mpsc::channel::<Discovered>(32);
+            let (tx, mut rx) = mpsc::channel::<Discovered>(0);
 
             let pump = tokio::spawn({
                 let server = server.clone();
