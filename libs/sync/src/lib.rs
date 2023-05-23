@@ -30,6 +30,7 @@ pub enum DeviceState {
     Receiving(RecordRange),
     Expecting((f32, Box<DeviceState>)),
     Synced,
+    Failed,
 }
 
 impl DeviceState {
@@ -107,6 +108,7 @@ impl ConnectedDevice {
             .with_initial_interval(Duration::from_millis(5000))
             .with_randomization_factor(0.0)
             .with_multiplier(1.8)
+            .with_max_elapsed_time(Some(Duration::from_secs(30)))
             .build()
     }
 
@@ -118,19 +120,29 @@ impl ConnectedDevice {
 
                 Some(Message::Query)
             }
+            DeviceState::Failed => None,
             _ => {
                 if self.is_stalled() {
-                    info!(
-                        "{:?} STALL {:?} {:?}",
-                        self.device_id,
-                        self.last_received_at(),
-                        self.received_has_gaps()
-                    );
-
                     if let Some(delay) = self.backoff.next_backoff() {
+                        info!(
+                            "{:?} STALL {:?} {:?}",
+                            self.device_id,
+                            self.last_received_at(),
+                            self.received_has_gaps()
+                        );
+
                         self.waiting_until = Some(Instant::now() + delay);
                         self.query_requires()
                     } else {
+                        info!(
+                            "{:?} FAILED {:?} {:?}",
+                            self.device_id,
+                            self.last_received_at(),
+                            self.received_has_gaps()
+                        );
+
+                        self.transition(DeviceState::Failed);
+
                         None
                     }
                 } else {
