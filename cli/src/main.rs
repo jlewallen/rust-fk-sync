@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use query::portal::{LoginPayload, PortalError, Tokens};
 use std::sync::Arc;
@@ -51,8 +51,8 @@ async fn main() -> Result<()> {
             let client = query::portal::Client::new()?;
             let tokens = client
                 .login(LoginPayload {
-                    email: std::env::var("FK_EMAIL")?,
-                    password: std::env::var("FK_PASSWORD")?,
+                    email: std::env::var("FK_EMAIL").context("FK_EMAIL is required.")?,
+                    password: std::env::var("FK_PASSWORD").context("FK_PASSWORD is required.")?,
                 })
                 .await?;
 
@@ -68,11 +68,14 @@ async fn main() -> Result<()> {
 
                 let client = client.to_authenticated(tokens)?;
 
-                let ourselves = client.query_ourselves().await?;
+                let ourselves = client.query_ourselves().await.context("GET /user")?;
 
                 println!("{:?}", ourselves);
 
-                let transmission_token = client.issue_transmission_token().await?;
+                let transmission_token = client
+                    .issue_transmission_token()
+                    .await
+                    .context("GET /transmission-token")?;
 
                 println!("{:?}", transmission_token);
             }
@@ -81,7 +84,10 @@ async fn main() -> Result<()> {
         }
         Some(Commands::QueryDevice) => {
             let client = query::device::Client::new()?;
-            let status = client.query_status("192.168.0.205").await?;
+            let status = client
+                .query_status("192.168.0.205")
+                .await
+                .context("Querying 192.168.0.205")?;
 
             info!("{:?}", status);
 
