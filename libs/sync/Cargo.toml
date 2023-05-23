@@ -14,7 +14,7 @@ hex = "0.4.3"
 lazy_static = "1.4.0"
 miette = "5.8.0"
 quick-protobuf = "0.8.1"
-range-set-blaze = "0.1.2"
+range-set-blaze = "0.1.5"
 socket2 = "0.4.7"
 thiserror = "1.0.40"
 tokio = { version = "1.27.0", features = ["full"] }
