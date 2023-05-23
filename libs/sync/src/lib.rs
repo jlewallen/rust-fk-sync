@@ -167,8 +167,8 @@ impl ConnectedDevice {
         }
 
         match message {
-            Message::Statistics { tail } => {
-                self.total_records = Some(*tail);
+            Message::Statistics { nrecords } => {
+                self.total_records = Some(*nrecords);
                 self.syncing_started = Some(Instant::now());
                 Ok(self.query_requires())
             }
@@ -212,10 +212,11 @@ impl ConnectedDevice {
 
     fn requires(&self) -> Option<RecordRange> {
         fn cap_length(r: RangeInclusive<u64>, len: u64) -> RangeInclusive<u64> {
+            assert!(len > 0);
             let end = *r.end();
             let start = *r.start();
             if end - start > len {
-                start..=(start + len)
+                start..=(start + len - 1)
             } else {
                 r
             }
@@ -241,7 +242,7 @@ impl ConnectedDevice {
         }
 
         let total_records = self.total_records?;
-        let total_required = RangeSetBlaze::from_iter([0..=total_records]) - &self.received;
+        let total_required = RangeSetBlaze::from_iter([0..=total_records - 1]) - &self.received;
 
         let mut requiring: Option<RangeInclusive<u64>> = None;
         for range in total_required.into_ranges() {
@@ -312,7 +313,7 @@ impl ConnectedDevice {
 
     fn completed(&self) -> Option<RangeProgress> {
         if let Some(total) = self.total_records {
-            let range = 0..=total;
+            let range = 0..=(total - 1);
             let complete = RangeSetBlaze::from_iter([range.clone()]);
             let total = complete.len() as usize;
             let received = self.received.len() as usize;
@@ -611,7 +612,7 @@ impl RecordRange {
     }
 
     fn to_set(&self) -> RangeSetBlaze<u64> {
-        RangeSetBlaze::from_iter([self.head()..=self.tail() - 1])
+        RangeSetBlaze::from_iter([self.head()..=self.tail()])
     }
 }
 
@@ -639,7 +640,7 @@ impl std::fmt::Debug for RawRecord {
 pub enum Message {
     Query,
     Statistics {
-        tail: u64,
+        nrecords: u64,
     },
     Require(RecordRange),
     Records {
@@ -668,14 +669,13 @@ impl Message {
         match kind {
             FK_UDP_PROTOCOL_KIND_QUERY => Ok(Self::Query {}),
             FK_UDP_PROTOCOL_KIND_STATISTICS => {
-                let tail = reader.read_fixed32(bytes)? as u64;
-                Ok(Self::Statistics { tail })
+                let nrecords = reader.read_fixed32(bytes)? as u64;
+                Ok(Self::Statistics { nrecords })
             }
             FK_UDP_PROTOCOL_KIND_REQUIRE => {
                 let head = reader.read_fixed32(bytes)? as u64;
-                let tail = reader.read_fixed32(bytes)? as u64;
-                assert!(tail > head);
-                Ok(Self::Require(RecordRange::new(head, tail - 1)))
+                let nrecords = reader.read_fixed32(bytes)? as u64;
+                Ok(Self::Require(RecordRange::new(head, nrecords - 1)))
             }
             FK_UDP_PROTOCOL_KIND_RECORDS => {
                 let head = reader.read_fixed32(bytes)? as u64;
@@ -711,15 +711,16 @@ impl Message {
                 writer.write_fixed32(0)?;
                 Ok(())
             }
-            Message::Statistics { tail } => {
+            Message::Statistics { nrecords } => {
                 writer.write_fixed32(1)?;
-                writer.write_fixed32(*tail as u32)?;
+                writer.write_fixed32(*nrecords as u32)?;
                 Ok(())
             }
             Message::Require(range) => {
+                let nrecords = range.tail() - range.head() + 1;
                 writer.write_fixed32(2)?;
                 writer.write_fixed32(range.head() as u32)?;
-                writer.write_fixed32(range.tail() as u32 + 1)?;
+                writer.write_fixed32(nrecords as u32)?;
                 Ok(())
             }
             Message::Records {
@@ -773,7 +774,7 @@ mod tests {
     pub fn test_requires_when_none_received() {
         let mut connected = test_device();
         connected.total_records = Some(100_000);
-        assert_eq!(connected.requires(), Some(RecordRange(0..=10_000)));
+        assert_eq!(connected.requires(), Some(RecordRange(0..=9_999)));
     }
 
     #[test]
@@ -781,7 +782,7 @@ mod tests {
         let mut connected = test_device();
         connected.total_records = Some(100_000);
         connected.received(RangeSetBlaze::from_iter([0..=1000]));
-        assert_eq!(connected.requires(), Some(RecordRange(1001..=11_001)));
+        assert_eq!(connected.requires(), Some(RecordRange(1001..=11_000)));
     }
 
     #[test]
@@ -810,7 +811,7 @@ mod tests {
         connected.total_records = Some(100_000);
         connected.received(RangeSetBlaze::from_iter([0..=1000]));
         connected.received(RangeSetBlaze::from_iter([30_000..=40_000]));
-        assert_eq!(connected.requires(), Some(RecordRange(1001..=11_001)));
+        assert_eq!(connected.requires(), Some(RecordRange(1001..=11_000)));
     }
 
     #[test]
