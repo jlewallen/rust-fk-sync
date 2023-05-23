@@ -94,10 +94,18 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::Sync) => {
-            let (transfer_publish, mut _transfer_events) = mpsc::channel::<ServerEvent>(32);
+            let (transfer_publish, mut transfer_events) = mpsc::channel::<ServerEvent>(32);
             let server = Arc::new(Server::new(transfer_publish));
             let discovery = Discovery::default();
-            let (tx, mut rx) = mpsc::channel::<Discovered>(0);
+            let (tx, mut rx) = mpsc::channel::<Discovered>(32);
+
+            let ignore = tokio::spawn({
+                async move {
+                    while let Some(d) = transfer_events.recv().await {
+                        trace!("{:?}", d);
+                    }
+                }
+            });
 
             let pump = tokio::spawn({
                 let server = server.clone();
@@ -118,6 +126,7 @@ async fn main() -> Result<()> {
                 _ = discovery.run(tx) => {},
                 _ = server.run() => {},
                 _ = pump => {},
+                _ = ignore=> {},
                 res = signal::ctrl_c() => {
                     return res.map_err(|e| e.into())
                 },
