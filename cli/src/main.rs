@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use query::portal::{LoginPayload, PortalError, Tokens};
 use std::sync::Arc;
 use tokio::{signal, sync::mpsc};
 use tracing::*;
 use tracing_subscriber::prelude::*;
 
-use discovery::{Discovered, Discovery};
+use discovery::{DeviceId, Discovered, Discovery};
 use sync::{Server, ServerEvent};
 
 #[derive(Parser)]
@@ -20,7 +20,15 @@ struct Cli {
 pub enum Commands {
     QueryDevice,
     QueryPortal,
-    Sync,
+    Sync(SyncCommand),
+}
+
+#[derive(Args)]
+pub struct SyncCommand {
+    #[arg(long, default_value = None)]
+    discover_device_id: Option<String>,
+    #[arg(long, default_value = None)]
+    discover_ip: Option<String>,
 }
 
 #[tokio::main]
@@ -93,7 +101,7 @@ async fn main() -> Result<()> {
 
             Ok(())
         }
-        Some(Commands::Sync) => {
+        Some(Commands::Sync(command)) => {
             let (transfer_publish, mut transfer_events) = mpsc::channel::<ServerEvent>(32);
             let server = Arc::new(Server::new(transfer_publish));
             let discovery = Discovery::default();
@@ -120,6 +128,31 @@ async fn main() -> Result<()> {
                     }
                 }
             });
+
+            match (command.discover_device_id, command.discover_ip) {
+                (Some(device_id), Some(ip)) => {
+                    let _begin = tokio::spawn({
+                        let server = server.clone();
+                        async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+                            server
+                                .sync(Discovered {
+                                    device_id: DeviceId(device_id),
+                                    http_addr: format!("{}:80", ip)
+                                        .parse()
+                                        .expect("Parsing http_addr failed"),
+                                    udp_addr: format!("{}:22144", ip)
+                                        .parse()
+                                        .expect("Parsing udp_addr failed"),
+                                })
+                                .await
+                                .expect("error initiating sync");
+                        }
+                    });
+                }
+                _ => {}
+            }
 
             #[allow(clippy::unit_arg)]
             Ok(tokio::select! {
