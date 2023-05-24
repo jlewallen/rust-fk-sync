@@ -132,7 +132,8 @@ impl ConnectedDevice {
                         );
 
                         self.waiting_until = Some(Instant::now() + delay);
-                        Ok(self.query_requires())
+
+                        self.query_requires(publish).await
                     } else {
                         info!(
                             "{:?} FAILED {:?} {:?}",
@@ -156,7 +157,11 @@ impl ConnectedDevice {
         }
     }
 
-    fn handle(&mut self, message: &Message) -> Result<Option<Message>> {
+    async fn handle(
+        &mut self,
+        publish: &Sender<ServerEvent>,
+        message: &Message,
+    ) -> Result<Option<Message>> {
         self.received_at = Instant::now();
         self.backoff.reset();
         self.waiting_until = None;
@@ -170,7 +175,7 @@ impl ConnectedDevice {
             Message::Statistics { nrecords } => {
                 self.total_records = Some(*nrecords);
                 self.syncing_started = Some(Instant::now());
-                Ok(self.query_requires())
+                self.query_requires(publish).await
             }
             Message::Records {
                 head,
@@ -189,24 +194,27 @@ impl ConnectedDevice {
 
                 Ok(None)
             }
-            Message::Batch { flags: _flags } => Ok(self.query_requires()),
+            Message::Batch { flags: _flags } => self.query_requires(publish).await,
             _ => Ok(None),
         }
     }
 
-    fn query_requires(&mut self) -> Option<Message> {
+    async fn query_requires(&mut self, publish: &Sender<ServerEvent>) -> Result<Option<Message>> {
         if let Some(range) = self.requires() {
             self.transition(DeviceState::expecting(DeviceState::Receiving(
                 range.clone(),
             )));
-            Some(Message::Require(range))
+            Ok(Some(Message::Require(range)))
         } else {
             if self.total_records.is_some() {
                 self.transition(DeviceState::Synced);
                 let elapsed = Instant::now() - self.syncing_started.unwrap();
                 info!("syncing took {:?}", elapsed);
+                publish
+                    .send(ServerEvent::Completed(self.device_id.clone()))
+                    .await?;
             }
-            None
+            Ok(None)
         }
     }
 
@@ -471,6 +479,10 @@ impl Server {
         self.send(ServerCommand::Begin(discovered)).await
     }
 
+    pub async fn cancel(&self, device_id: DeviceId) -> Result<()> {
+        self.send(ServerCommand::Cancel(device_id)).await
+    }
+
     async fn send(&self, cmd: ServerCommand) -> Result<()> {
         let locked = self.sender.lock().await;
         Ok(locked.as_ref().expect("sender required").send(cmd).await?)
@@ -522,7 +534,7 @@ async fn handle_server_command(
             if let Some(device_id) = device_id_by_addr.get(addr) {
                 match devices.get_mut(device_id) {
                     Some(connected) => {
-                        let reply = connected.handle(message)?;
+                        let reply = connected.handle(publish, message).await?;
 
                         if let Some(reply) = reply {
                             transmit(sending, &addr, &reply).await?;
@@ -558,11 +570,14 @@ async fn handle_server_command(
         }
         ServerCommand::Cancel(device_id) => {
             if let Some(connected) = devices.remove_entry(device_id) {
+                info!("{:?} removed", device_id);
                 device_id_by_addr.remove(&connected.1.addr);
                 match connected.1.state {
                     DeviceState::Synced => {}
                     _ => publish.send(ServerEvent::Failed(device_id.clone())).await?,
                 }
+            } else {
+                info!("{:?} unknown", device_id);
             }
         }
     }

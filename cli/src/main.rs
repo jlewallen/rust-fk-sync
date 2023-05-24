@@ -108,9 +108,18 @@ async fn main() -> Result<()> {
             let (tx, mut rx) = mpsc::channel::<Discovered>(32);
 
             let ignore = tokio::spawn({
+                let server = server.clone();
                 async move {
                     while let Some(d) = transfer_events.recv().await {
-                        trace!("{:?}", d);
+                        match d {
+                            ServerEvent::Completed(device_id) => {
+                                info!("{:?} pausing", device_id);
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                info!("{:?} removing sync", device_id);
+                                server.cancel(device_id).await.expect("Error cancelling")
+                            }
+                            _ => trace!("{:?}", d),
+                        }
                     }
                 }
             });
@@ -122,7 +131,7 @@ async fn main() -> Result<()> {
                         if let Some(http_addr) = d.http_addr {
                             if http_addr.port() == 80 || http_addr.port() == 0 {
                                 info!("{:?}", d);
-                                server.sync(d).await.expect("error initiating sync");
+                                server.sync(d).await.expect("Error initiating sync");
                             } else {
                                 debug!("{:?} (ignored)", d);
                             }
