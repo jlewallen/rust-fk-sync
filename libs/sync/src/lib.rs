@@ -559,7 +559,10 @@ async fn handle_server_command(
         ServerCommand::Cancel(device_id) => {
             if let Some(connected) = devices.remove_entry(device_id) {
                 device_id_by_addr.remove(&connected.1.addr);
-                publish.send(ServerEvent::Failed(device_id.clone())).await?;
+                match connected.1.state {
+                    DeviceState::Synced => {}
+                    _ => publish.send(ServerEvent::Failed(device_id.clone())).await?,
+                }
             }
         }
     }
