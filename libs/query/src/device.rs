@@ -1,6 +1,7 @@
 use anyhow::Result;
 use prost::Message;
 use reqwest::header::HeaderMap;
+use reqwest::RequestBuilder;
 use std::io::Cursor;
 use std::time::Duration;
 use tracing::*;
@@ -32,26 +33,31 @@ impl Client {
     }
 
     pub async fn query_status(&self, addr: &str) -> Result<HttpReply> {
-        let url = format!("http://{}/fk/v1", addr);
+        self.execute(self.new_request(addr)?.build()?).await
+    }
+
+    pub async fn query_readings(&self, addr: &str) -> Result<HttpReply> {
+        let mut query = HttpQuery::default();
+        query.r#type = QueryType::QueryGetReadings as i32;
+        let encoded = query.encode_length_delimited_to_vec();
+        let req = self.new_request(addr)?.body(encoded).build()?;
+        self.execute(req).await
+    }
+
+    async fn execute(&self, req: reqwest::Request) -> Result<HttpReply> {
+        let url = req.url().clone();
+
         debug!("{} querying", &url);
-
-        let req = self
-            .client
-            .get(&url)
-            .timeout(Duration::from_secs(10))
-            .build()?;
-
         let response = self.client.execute(req).await?;
         let bytes = response.bytes().await?;
 
         debug!("{} queried, got {} bytes", &url, bytes.len());
-        let data = HttpReply::decode_length_delimited(bytes)?;
-
-        Ok(data)
+        Ok(HttpReply::decode_length_delimited(bytes)?)
     }
 
-    pub async fn configure(&self, _addr: &str, _query: HttpQuery) -> Result<HttpReply> {
-        todo!()
+    fn new_request(&self, addr: &str) -> Result<RequestBuilder> {
+        let url = format!("http://{}/fk/v1", addr);
+        Ok(self.client.post(&url).timeout(Duration::from_secs(5)))
     }
 }
 
