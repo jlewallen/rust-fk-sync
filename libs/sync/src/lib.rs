@@ -52,7 +52,7 @@ struct RangeProgress {
 impl std::fmt::Debug for RangeProgress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
-            "{:.3} ({}/{}, {:?})",
+            "{:.4} ({}/{}, {:?})",
             self.completed, self.received, self.total, self.range
         ))
     }
