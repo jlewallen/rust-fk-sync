@@ -519,6 +519,19 @@ async fn handle_server_command(
             let udp_addr = discovered
                 .udp_addr
                 .ok_or(anyhow::anyhow!("Udp address is required"))?;
+
+            // This is handy for live testing a range of records that are
+            // behaving oddly, so we don't remember stations and just re-ask
+            // for the given range on each discovery.
+            if false {
+                return Ok(transmit(
+                    sending,
+                    &udp_addr,
+                    &Message::Require(RecordRange::new(196000, 197000)),
+                )
+                .await?);
+            }
+
             let entry = devices.entry(discovered.device_id.clone());
             let entry = entry
                 .or_insert_with(|| ConnectedDevice::new(discovered.device_id.clone(), udp_addr));
