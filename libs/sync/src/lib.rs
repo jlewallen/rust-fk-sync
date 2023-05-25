@@ -1,9 +1,12 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use backoff::{backoff::Backoff, ExponentialBackoff, ExponentialBackoffBuilder};
 use discovery::{DeviceId, Discovered};
+use quick_protobuf::reader::BytesReader;
+use quick_protobuf::writer::Writer;
 use range_set_blaze::prelude::*;
 use std::{
     collections::HashMap,
+    iter,
     net::{SocketAddr, SocketAddrV4},
     ops::RangeInclusive,
     sync::Arc,
@@ -180,8 +183,11 @@ impl ConnectedDevice {
             Message::Records {
                 head,
                 flags: _flags,
+                sequence: _sequence,
                 records,
             } => {
+                assert!(!records.is_empty());
+
                 // Include the received records in our received set.
                 let just_received: RangeSetBlaze<u64> =
                     (0..records.len()).map(|v| v as u64 + *head).collect();
@@ -209,7 +215,7 @@ impl ConnectedDevice {
             if self.total_records.is_some() {
                 self.transition(DeviceState::Synced);
                 let elapsed = Instant::now() - self.syncing_started.unwrap();
-                info!("syncing took {:?}", elapsed);
+                info!("Syncing took {:?}", elapsed);
                 publish
                     .send(ServerEvent::Completed(self.device_id.clone()))
                     .await?;
@@ -585,14 +591,24 @@ async fn handle_server_command(
     Ok(())
 }
 
+async fn try_receive_one(receiving: &UdpSocket) -> Result<(Message, SocketAddr)> {
+    let mut codec = MessageCodec::default();
+
+    loop {
+        let mut buffer = vec![0u8; 4096];
+
+        let (len, addr) = receiving.recv_from(&mut buffer[..]).await?;
+
+        trace!("{} bytes from {}", len, addr);
+
+        if let Some(message) = codec.try_read(&buffer[..len])? {
+            return Ok((message, addr));
+        }
+    }
+}
+
 async fn receive_and_process(receiving: &UdpSocket, tx: &Sender<ServerCommand>) -> Result<()> {
-    let mut buffer = vec![0u8; 4096];
-
-    let (len, addr) = receiving.recv_from(&mut buffer[..]).await?;
-
-    trace!("{} bytes from {}", len, addr);
-
-    let message = Message::read(&buffer[0..len])?;
+    let (message, addr) = try_receive_one(receiving).await?;
 
     tx.send(ServerCommand::Received(addr, message)).await?;
 
@@ -614,7 +630,7 @@ where
     Ok(())
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct RecordRange(RangeInclusive<u64>);
 
 impl RecordRange {
@@ -647,15 +663,67 @@ impl From<&RangeInclusive<u64>> for RecordRange {
     }
 }
 
-pub struct RawRecord(Vec<u8>);
+#[derive(PartialEq, Eq, Clone)]
+pub enum Record {
+    Undelimited(Vec<u8>),
+    Bytes(Vec<u8>),
+}
 
-impl std::fmt::Debug for RawRecord {
+impl std::fmt::Debug for Record {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("RawRecord").field(&self.0.len()).finish()
+        match self {
+            Record::Undelimited(bytes) => f.debug_tuple("Undelimited").field(&bytes.len()).finish(),
+            Record::Bytes(bytes) => f.debug_tuple("Bytes").field(&bytes.len()).finish(),
+        }
     }
 }
 
-#[derive(Debug)]
+impl Record {
+    pub fn new_all_zeros(len: usize) -> Result<Self> {
+        let zeros: Vec<u8> = iter::repeat(0 as u8).take(len).collect();
+        Ok(Self::Undelimited(zeros))
+    }
+
+    pub fn into_delimited(self) -> Result<Record> {
+        match self {
+            Record::Undelimited(bytes) | Record::Bytes(bytes) => {
+                let mut writing = Vec::new();
+                {
+                    let mut writer = Writer::new(&mut writing);
+                    writer.write_bytes(&bytes)?;
+                }
+                Ok(Self::Bytes(writing))
+            }
+        }
+    }
+
+    pub fn into_undelimited(self) -> Result<Vec<Record>> {
+        match self {
+            Record::Undelimited(bytes) => Ok(vec![Record::Undelimited(bytes)]),
+            Record::Bytes(bytes) => {
+                let mut records = vec![];
+                let mut reader = BytesReader::from_bytes(&bytes);
+                while !reader.is_eof() {
+                    records.push(Record::Undelimited(reader.read_bytes(&bytes)?.into()));
+                }
+                Ok(records)
+            }
+        }
+    }
+
+    pub fn split_off(&self, at: usize) -> (Record, Record) {
+        match self {
+            Record::Bytes(bytes) => {
+                let mut first = bytes.clone();
+                let second = first.split_off(at);
+                (Record::Bytes(first), Record::Bytes(second))
+            }
+            _ => todo!(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum Message {
     Query,
     Statistics {
@@ -665,7 +733,8 @@ pub enum Message {
     Records {
         head: u64,
         flags: u32,
-        records: Vec<RawRecord>,
+        sequence: u32,
+        records: Vec<Record>,
     },
     Batch {
         flags: u32,
@@ -678,66 +747,169 @@ const FK_UDP_PROTOCOL_KIND_REQUIRE: u32 = 2;
 const FK_UDP_PROTOCOL_KIND_RECORDS: u32 = 3;
 const FK_UDP_PROTOCOL_KIND_BATCH: u32 = 4;
 
-impl Message {
-    fn read(bytes: &[u8]) -> Result<Self> {
-        use quick_protobuf::reader::BytesReader;
+#[derive(Default)]
+struct MessageCodec {
+    partial: Option<(u64, u32)>,
+    buffered: Vec<u8>,
+}
 
+impl MessageCodec {
+    fn reset(&mut self) {
+        self.partial = None;
+        self.buffered.clear();
+    }
+
+    fn try_read(&mut self, bytes: &[u8]) -> Result<Option<Message>> {
         let mut reader = BytesReader::from_bytes(bytes);
+
+        let (header, payload) = Message::read_header(&mut reader, bytes)?;
+
+        match payload {
+            Some(payload) => match header {
+                Message::Records {
+                    head,
+                    flags,
+                    sequence,
+                    records: _,
+                } => {
+                    if flags > 0 {
+                        self.buffered.extend(payload);
+
+                        match self.partial.clone() {
+                            Some(partial) => {
+                                if head != partial.0 {
+                                    warn!(
+                                        "Partial head mismatch ({} != {}) dropping",
+                                        head, partial.0
+                                    );
+                                    self.reset();
+                                }
+
+                                if sequence != partial.1 + 1 {
+                                    warn!(
+                                        "Partial sequence mismatch ({} != {}) dropping",
+                                        sequence, partial.1
+                                    );
+                                    self.reset();
+                                }
+
+                                let mut reader = BytesReader::from_bytes(&self.buffered);
+                                let records =
+                                    Message::read_raw_records(&mut reader, &self.buffered)?;
+
+                                match &records {
+                                    Some(_) => {
+                                        info!("Partial record #{}: Completed", head);
+                                        self.reset();
+                                    }
+                                    None => {
+                                        info!("Partial record #{}: Waiting for remainder", head);
+                                    }
+                                };
+
+                                Ok(records.map(|records| Message::Records {
+                                    head,
+                                    flags: 0,
+                                    sequence: 0,
+                                    records,
+                                }))
+                            }
+                            None => {
+                                self.partial = Some((head, sequence));
+
+                                // No need to try parsing as this is the first partial packet.
+                                Ok(None)
+                            }
+                        }
+                    } else {
+                        let records = Message::read_raw_records(&mut reader, bytes)?;
+
+                        Ok(Some(Message::Records {
+                            head,
+                            flags,
+                            sequence,
+                            records: records.ok_or(anyhow!("Error parsing records"))?,
+                        }))
+                    }
+                }
+                _ => todo!(),
+            },
+            None => Ok(Some(header)),
+        }
+    }
+}
+
+impl Message {
+    fn read_raw_records(reader: &mut BytesReader, bytes: &[u8]) -> Result<Option<Vec<Record>>> {
+        let mut records = vec![];
+
+        while !reader.is_eof() {
+            match reader.read_bytes(bytes) {
+                Ok(record) => records.push(Record::Undelimited(record.into())),
+                Err(_) => return Ok(None),
+            }
+        }
+
+        Ok(Some(records))
+    }
+
+    fn read_header(reader: &mut BytesReader, bytes: &[u8]) -> Result<(Self, Option<Vec<u8>>)> {
         let kind = reader.read_fixed32(bytes)?;
 
         match kind {
-            FK_UDP_PROTOCOL_KIND_QUERY => Ok(Self::Query {}),
+            FK_UDP_PROTOCOL_KIND_QUERY => Ok((Self::Query {}, None)),
             FK_UDP_PROTOCOL_KIND_STATISTICS => {
                 let nrecords = reader.read_fixed32(bytes)? as u64;
-                Ok(Self::Statistics { nrecords })
+                Ok((Self::Statistics { nrecords }, None))
             }
             FK_UDP_PROTOCOL_KIND_REQUIRE => {
                 let head = reader.read_fixed32(bytes)? as u64;
                 let nrecords = reader.read_fixed32(bytes)? as u64;
-                Ok(Self::Require(RecordRange::new(head, nrecords - 1)))
+                Ok((Self::Require(RecordRange::new(head, nrecords - 1)), None))
             }
             FK_UDP_PROTOCOL_KIND_RECORDS => {
                 let head = reader.read_fixed32(bytes)? as u64;
                 let flags = reader.read_fixed32(bytes)?;
-                let mut records: Vec<RawRecord> = Vec::new();
-                while !reader.is_eof() {
-                    let record = reader.read_bytes(bytes)?;
-                    records.push(RawRecord(record.into()));
-                }
+                let sequence = reader.read_fixed32(bytes)?;
+                let remaining = reader.len();
+                let skip = bytes.len() - remaining;
+                let payload = bytes[skip..].to_vec();
 
-                Ok(Self::Records {
-                    head,
-                    flags,
-                    records,
-                })
+                Ok((
+                    Self::Records {
+                        head,
+                        flags,
+                        sequence,
+                        records: Vec::new(),
+                    },
+                    Some(payload),
+                ))
             }
             FK_UDP_PROTOCOL_KIND_BATCH => {
                 let flags = reader.read_fixed32(bytes)?;
 
-                Ok(Self::Batch { flags })
+                Ok((Self::Batch { flags }, None))
             }
             _ => todo!(),
         }
     }
 
     fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        use quick_protobuf::writer::Writer;
-
         let mut writer = Writer::new(bytes);
 
         match self {
             Message::Query => {
-                writer.write_fixed32(0)?;
+                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_QUERY)?;
                 Ok(())
             }
             Message::Statistics { nrecords } => {
-                writer.write_fixed32(1)?;
+                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_STATISTICS)?;
                 writer.write_fixed32(*nrecords as u32)?;
                 Ok(())
             }
             Message::Require(range) => {
                 let nrecords = range.tail() - range.head() + 1;
-                writer.write_fixed32(2)?;
+                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_REQUIRE)?;
                 writer.write_fixed32(range.head() as u32)?;
                 writer.write_fixed32(nrecords as u32)?;
                 Ok(())
@@ -745,15 +917,28 @@ impl Message {
             Message::Records {
                 head,
                 flags,
+                sequence,
                 records,
             } => {
-                writer.write_fixed32(3)?;
+                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_RECORDS)?;
                 writer.write_fixed32(*head as u32)?;
                 writer.write_fixed32(*flags)?;
-                assert!(records.is_empty()); // Laziness
+                writer.write_fixed32(*sequence)?;
+                for record in records {
+                    match record {
+                        Record::Undelimited(bytes) => writer.write_bytes(bytes)?,
+                        Record::Bytes(bytes) => {
+                            // I really wish I could find a better way to do this.
+                            for byte in bytes.iter() {
+                                writer.write_u8(*byte)?;
+                            }
+                        }
+                    }
+                }
                 Ok(())
             }
             Message::Batch { flags } => {
+                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_BATCH)?;
                 writer.write_fixed32(*flags)?;
                 Ok(())
             }
@@ -765,6 +950,7 @@ impl Message {
             Message::Records {
                 head: _head,
                 flags: _flags,
+                sequence: _sequence,
                 records: _records,
             } => trace!("{:?}", self),
             _ => info!("{:?}", self),
@@ -846,5 +1032,136 @@ mod tests {
         let mut backoff = ConnectedDevice::stall_backoff();
         assert_eq!(backoff.next_backoff(), Some(Duration::from_millis(5000)));
         assert_eq!(backoff.next_backoff(), Some(Duration::from_millis(9000)));
+    }
+
+    #[test]
+    pub fn test_serialization_query() -> Result<()> {
+        let message = Message::Query;
+        let mut buffer = Vec::new();
+        message.write(&mut buffer)?;
+
+        let mut codec = MessageCodec::default();
+
+        assert_eq!(codec.try_read(&buffer)?, Some(Message::Query));
+
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_serialization_statistics() -> Result<()> {
+        let message = Message::Statistics { nrecords: 100 };
+        let mut buffer = Vec::new();
+        message.write(&mut buffer)?;
+
+        let mut codec = MessageCodec::default();
+
+        assert_eq!(
+            codec.try_read(&buffer)?,
+            Some(Message::Statistics { nrecords: 100 })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_serialization_batch() -> Result<()> {
+        let message = Message::Batch { flags: 0xff };
+        let mut buffer = Vec::new();
+        message.write(&mut buffer)?;
+
+        let mut codec = MessageCodec::default();
+
+        assert_eq!(
+            codec.try_read(&buffer)?,
+            Some(Message::Batch { flags: 0xff })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_serialization_require() -> Result<()> {
+        let message = Message::Require(RecordRange::new(0, 100));
+        let mut buffer = Vec::new();
+        message.write(&mut buffer)?;
+
+        let mut codec = MessageCodec::default();
+
+        assert_eq!(
+            codec.try_read(&buffer)?,
+            Some(Message::Require(RecordRange::new(0, 100)))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_serialization_records_simple() -> Result<()> {
+        let r1 = Record::new_all_zeros(166)?;
+        let r2 = Record::new_all_zeros(212)?;
+        let records = vec![r1, r2];
+        let message = Message::Records {
+            head: 32768,
+            flags: 0,
+            sequence: 0,
+            records: records.clone(),
+        };
+        let mut buffer = Vec::new();
+        message.write(&mut buffer)?;
+
+        let mut codec = MessageCodec::default();
+
+        assert_eq!(
+            codec.try_read(&buffer)?,
+            Some(Message::Records {
+                head: 32768,
+                flags: 0,
+                sequence: 0,
+                records: records
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_serialization_records_partial() -> Result<()> {
+        let original = Record::new_all_zeros(1024)?;
+        let r1 = original.clone().into_delimited()?;
+        let (first, second) = r1.split_off(386);
+
+        let m1 = Message::Records {
+            head: 32768,
+            flags: 1,
+            sequence: 0,
+            records: vec![first],
+        };
+        let m2 = Message::Records {
+            head: 32768,
+            flags: 1,
+            sequence: 1,
+            records: vec![second],
+        };
+
+        let mut b1 = Vec::new();
+        m1.write(&mut b1)?;
+        let mut b2 = Vec::new();
+        m2.write(&mut b2)?;
+
+        let mut codec = MessageCodec::default();
+
+        assert_eq!(codec.try_read(&b1)?, None);
+
+        assert_eq!(
+            codec.try_read(&b2)?,
+            Some(Message::Records {
+                head: 32768,
+                flags: 0,
+                sequence: 0,
+                records: vec![original]
+            })
+        );
+
+        Ok(())
     }
 }
