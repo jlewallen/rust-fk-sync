@@ -170,7 +170,6 @@ impl ConnectedDevice {
         self.waiting_until = None;
 
         if let DeviceState::Expecting((_deadline, after)) = &self.state {
-            info!("expectation fulfilled");
             self.transition(*Box::clone(after)) // TODO into_inner on unstable
         }
 
@@ -196,7 +195,7 @@ impl ConnectedDevice {
                 let progress = self.progress();
                 let has_gaps = self.received_has_gaps();
                 let progress = progress.map_or("".to_owned(), |f| format!("{:?}", f));
-                info!("{} {:?}", progress, &has_gaps);
+                trace!("{} {:?}", progress, &has_gaps);
 
                 Ok(None)
             }
