@@ -10,7 +10,7 @@ use std::{
     net::{SocketAddr, SocketAddrV4},
     ops::RangeInclusive,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::{
     net::{ToSocketAddrs, UdpSocket},
@@ -42,11 +42,11 @@ impl DeviceState {
     }
 }
 
-struct RangeProgress {
-    range: RangeInclusive<u64>,
-    completed: f32,
-    total: usize,
-    received: usize,
+pub struct RangeProgress {
+    pub range: RangeInclusive<u64>,
+    pub completed: f32,
+    pub total: usize,
+    pub received: usize,
 }
 
 impl std::fmt::Debug for RangeProgress {
@@ -60,8 +60,8 @@ impl std::fmt::Debug for RangeProgress {
 
 #[allow(dead_code)]
 pub struct Progress {
-    total: Option<RangeProgress>,
-    batch: Option<RangeProgress>,
+    pub total: Option<RangeProgress>,
+    pub batch: Option<RangeProgress>,
 }
 
 impl std::fmt::Debug for Progress {
@@ -87,7 +87,7 @@ pub struct ConnectedDevice {
     received: RangeSetBlaze<u64>,
     backoff: ExponentialBackoff,
     waiting_until: Option<Instant>,
-    syncing_started: Option<Instant>,
+    syncing_started: Option<SystemTime>,
 }
 
 impl ConnectedDevice {
@@ -176,7 +176,7 @@ impl ConnectedDevice {
         match message {
             Message::Statistics { nrecords } => {
                 self.total_records = Some(*nrecords);
-                self.syncing_started = Some(Instant::now());
+                self.syncing_started = Some(SystemTime::now());
                 self.query_requires(publish).await
             }
             Message::Records {
@@ -213,7 +213,7 @@ impl ConnectedDevice {
         } else {
             if self.total_records.is_some() {
                 self.transition(DeviceState::Synced);
-                let elapsed = Instant::now() - self.syncing_started.unwrap();
+                let elapsed = SystemTime::now().duration_since(self.syncing_started.unwrap())?;
                 info!("Syncing took {:?}", elapsed);
                 publish
                     .send(ServerEvent::Completed(self.device_id.clone()))
@@ -395,7 +395,7 @@ pub enum ServerCommand {
 #[derive(Debug)]
 pub enum ServerEvent {
     Began(DeviceId),
-    Progress(DeviceId, Progress),
+    Progress(DeviceId, SystemTime, Progress),
     Completed(DeviceId),
     Failed(DeviceId),
 }
@@ -424,7 +424,7 @@ impl Server {
 
         let mut device_id_by_addr: HashMap<SocketAddr, DeviceId> = HashMap::new();
         let mut devices: HashMap<DeviceId, ConnectedDevice> = HashMap::new();
-        let (tx, mut rx) = mpsc::channel::<ServerCommand>(32);
+        let (tx, mut rx) = mpsc::channel::<ServerCommand>(1024);
 
         let pump = tokio::spawn({
             let mut locked = self.sender.lock().await;
@@ -559,8 +559,9 @@ async fn handle_server_command(
                         }
 
                         if let Some(progress) = connected.progress() {
+                            let started = connected.syncing_started.unwrap_or(SystemTime::now());
                             publish
-                                .send(ServerEvent::Progress(device_id.clone(), progress))
+                                .send(ServerEvent::Progress(device_id.clone(), started, progress))
                                 .await?;
                         }
                     }
