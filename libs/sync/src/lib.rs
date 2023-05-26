@@ -678,6 +678,18 @@ impl From<&RangeInclusive<u64>> for RecordRange {
     }
 }
 
+#[derive(Clone)]
+pub struct NumberedRecord {
+    pub number: u64,
+    pub record: Record,
+}
+
+impl NumberedRecord {
+    pub fn new(number: u64, record: Record) -> Self {
+        Self { number, record }
+    }
+}
+
 #[derive(PartialEq, Eq, Clone)]
 pub enum Record {
     Undelimited(Vec<u8>),
@@ -809,8 +821,7 @@ impl MessageCodec {
                                 }
 
                                 let mut reader = BytesReader::from_bytes(&self.buffered);
-                                let records =
-                                    Message::read_raw_records(&mut reader, &self.buffered)?;
+                                let records = self.read_raw_records(&mut reader, &self.buffered)?;
 
                                 match &records {
                                     Some(_) => {
@@ -837,7 +848,7 @@ impl MessageCodec {
                             }
                         }
                     } else {
-                        let records = Message::read_raw_records(&mut reader, bytes)?;
+                        let records = self.read_raw_records(&mut reader, bytes)?;
 
                         Ok(Some(Message::Records {
                             head,
@@ -852,10 +863,12 @@ impl MessageCodec {
             None => Ok(Some(header)),
         }
     }
-}
 
-impl Message {
-    fn read_raw_records(reader: &mut BytesReader, bytes: &[u8]) -> Result<Option<Vec<Record>>> {
+    fn read_raw_records(
+        &self,
+        reader: &mut BytesReader,
+        bytes: &[u8],
+    ) -> Result<Option<Vec<Record>>> {
         let mut records = vec![];
 
         while !reader.is_eof() {
@@ -866,6 +879,24 @@ impl Message {
         }
 
         Ok(Some(records))
+    }
+}
+
+impl Message {
+    pub fn numbered_records(self) -> Result<Vec<NumberedRecord>> {
+        match self {
+            Message::Records {
+                head,
+                flags: _,
+                sequence: _,
+                records,
+            } => Ok(records
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| NumberedRecord::new(i as u64 + head, r))
+                .collect()),
+            _ => Err(anyhow!("Expected Records message")),
+        }
     }
 
     fn read_header(reader: &mut BytesReader, bytes: &[u8]) -> Result<(Self, Option<Vec<u8>>)> {
