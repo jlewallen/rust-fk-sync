@@ -402,23 +402,21 @@ pub enum ServerEvent {
 
 pub struct Server {
     port: u16,
-    publish: Sender<ServerEvent>,
     sender: Arc<Mutex<Option<Sender<ServerCommand>>>>,
 }
 
 impl Server {
-    pub fn new(publish: Sender<ServerEvent>) -> Self {
+    pub fn new() -> Self {
         Self {
             port: 22144,
-            publish,
             sender: Arc::new(Mutex::new(None)),
         }
     }
-    pub async fn run(&self) -> Result<()> {
+
+    pub async fn run(&self, publish: Sender<ServerEvent>) -> Result<()> {
         let listening_addr = SocketAddrV4::new(IP_ALL.into(), self.port);
         let receiving = Arc::new(self.bind(&listening_addr)?);
         let sending = receiving.clone();
-        let publish = self.publish.clone();
 
         info!("listening on {}", listening_addr);
 
@@ -441,7 +439,7 @@ impl Server {
                     .await
                     {
                         Ok(_) => {}
-                        Err(e) => warn!("Server command error: {:?}", e),
+                        Err(e) => warn!("Server command error: {}", e),
                     }
                 }
             }
@@ -453,8 +451,8 @@ impl Server {
             async move {
                 loop {
                     match receive_and_process(&receiving, &tx).await {
+                        Err(e) => warn!("Receive and process error: {}", e),
                         Ok(_) => {}
-                        Err(e) => warn!("Receive and process error: {:?}", e),
                     }
                 }
             }
@@ -467,7 +465,7 @@ impl Server {
                 interval.tick().await;
 
                 match tx.send(ServerCommand::Tick).await {
-                    Err(e) => warn!("Tick error: {:?}", e),
+                    Err(e) => warn!("Tick error: {}", e),
                     Ok(_) => {}
                 }
             }
@@ -490,7 +488,11 @@ impl Server {
 
     async fn send(&self, cmd: ServerCommand) -> Result<()> {
         let locked = self.sender.lock().await;
-        Ok(locked.as_ref().expect("sender required").send(cmd).await?)
+        Ok(locked
+            .as_ref()
+            .ok_or_else(|| anyhow!("Sender required"))?
+            .send(cmd)
+            .await?)
     }
 
     fn bind(&self, addr: &SocketAddrV4) -> Result<UdpSocket> {

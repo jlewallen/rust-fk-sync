@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Sync(command)) => {
             let (transfer_publish, mut transfer_events) = mpsc::channel::<ServerEvent>(32);
-            let server = Arc::new(Server::new(transfer_publish));
+            let server = Arc::new(Server::new());
             let discovery = Discovery::default();
             let (tx, mut rx) = mpsc::channel::<Discovered>(32);
 
@@ -172,7 +172,7 @@ async fn main() -> Result<()> {
             #[allow(clippy::unit_arg)]
             Ok(tokio::select! {
                 _ = discovery.run(tx) => {},
-                _ = server.run() => {},
+                _ = server.run(transfer_publish) => {},
                 _ = pump => {},
                 _ = ignore=> {},
                 res = signal::ctrl_c() => {
