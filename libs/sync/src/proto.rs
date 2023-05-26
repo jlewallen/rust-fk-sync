@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use quick_protobuf::reader::BytesReader;
 use quick_protobuf::writer::Writer;
 use range_set_blaze::prelude::*;
-use std::{iter, ops::RangeInclusive};
+use std::ops::RangeInclusive;
 use tracing::*;
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -13,16 +13,16 @@ impl RecordRange {
         Self(RangeInclusive::new(h, t))
     }
 
+    pub fn to_set(&self) -> RangeSetBlaze<u64> {
+        RangeSetBlaze::from_iter([self.head()..=self.tail()])
+    }
+
     fn head(&self) -> u64 {
         *self.0.start()
     }
 
     fn tail(&self) -> u64 {
         *self.0.end()
-    }
-
-    pub fn to_set(&self) -> RangeSetBlaze<u64> {
-        RangeSetBlaze::from_iter([self.head()..=self.tail()])
     }
 }
 
@@ -50,10 +50,10 @@ impl NumberedRecord {
     }
 }
 
-#[allow(dead_code)]
 #[derive(PartialEq, Eq, Clone)]
 pub enum Record {
     Undelimited(Vec<u8>),
+    #[cfg(test)]
     Bytes(Vec<u8>),
 }
 
@@ -61,18 +61,20 @@ impl std::fmt::Debug for Record {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Record::Undelimited(bytes) => f.debug_tuple("Undelimited").field(&bytes.len()).finish(),
+            #[cfg(test)]
             Record::Bytes(bytes) => f.debug_tuple("Bytes").field(&bytes.len()).finish(),
         }
     }
 }
 
-#[allow(dead_code)]
 impl Record {
+    #[cfg(test)]
     pub fn new_all_zeros(len: usize) -> Result<Self> {
-        let zeros: Vec<u8> = iter::repeat(0 as u8).take(len).collect();
+        let zeros: Vec<u8> = std::iter::repeat(0 as u8).take(len).collect();
         Ok(Self::Undelimited(zeros))
     }
 
+    #[cfg(test)]
     pub fn into_delimited(self) -> Result<Record> {
         match self {
             Record::Undelimited(bytes) | Record::Bytes(bytes) => {
@@ -86,6 +88,8 @@ impl Record {
         }
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn into_undelimited(self) -> Result<Vec<Record>> {
         match self {
             Record::Undelimited(bytes) => Ok(vec![Record::Undelimited(bytes)]),
@@ -100,6 +104,7 @@ impl Record {
         }
     }
 
+    #[cfg(test)]
     pub fn split_off(&self, at: usize) -> (Record, Record) {
         match self {
             Record::Bytes(bytes) => {
@@ -137,17 +142,12 @@ const FK_UDP_PROTOCOL_KIND_RECORDS: u32 = 3;
 const FK_UDP_PROTOCOL_KIND_BATCH: u32 = 4;
 
 #[derive(Default)]
-pub struct MessageCodec {
+pub(crate) struct MessageCodec {
     partial: Option<(u64, u32)>,
     buffered: Vec<u8>,
 }
 
 impl MessageCodec {
-    fn reset(&mut self) {
-        self.partial = None;
-        self.buffered.clear();
-    }
-
     pub(crate) fn try_read(&mut self, bytes: &[u8]) -> Result<Option<Message>> {
         let mut reader = BytesReader::from_bytes(bytes);
 
@@ -226,6 +226,11 @@ impl MessageCodec {
         }
     }
 
+    fn reset(&mut self) {
+        self.partial = None;
+        self.buffered.clear();
+    }
+
     fn read_raw_records(
         &self,
         reader: &mut BytesReader,
@@ -259,6 +264,70 @@ impl Message {
                 .map(|(i, r)| NumberedRecord::new(i as u64 + head, r))
                 .collect()),
             _ => Err(anyhow!("Expected Records message")),
+        }
+    }
+
+    pub(crate) fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        let mut writer = Writer::new(bytes);
+
+        match self {
+            Message::Query => {
+                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_QUERY)?;
+                Ok(())
+            }
+            Message::Statistics { nrecords } => {
+                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_STATISTICS)?;
+                writer.write_fixed32(*nrecords as u32)?;
+                Ok(())
+            }
+            Message::Require(range) => {
+                let nrecords = range.tail() - range.head() + 1;
+                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_REQUIRE)?;
+                writer.write_fixed32(range.head() as u32)?;
+                writer.write_fixed32(nrecords as u32)?;
+                Ok(())
+            }
+            Message::Records {
+                head,
+                flags,
+                sequence,
+                records,
+            } => {
+                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_RECORDS)?;
+                writer.write_fixed32(*head as u32)?;
+                writer.write_fixed32(*flags)?;
+                writer.write_fixed32(*sequence)?;
+                for record in records {
+                    match record {
+                        Record::Undelimited(bytes) => writer.write_bytes(bytes)?,
+                        #[cfg(test)]
+                        Record::Bytes(bytes) => {
+                            // I really wish I could find a better way to do this.
+                            for byte in bytes.iter() {
+                                writer.write_u8(*byte)?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Message::Batch { flags } => {
+                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_BATCH)?;
+                writer.write_fixed32(*flags)?;
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn log_received(&self) {
+        match self {
+            Message::Records {
+                head: _head,
+                flags: _flags,
+                sequence: _sequence,
+                records: _records,
+            } => trace!("{:?}", self),
+            _ => info!("{:?}", self),
         }
     }
 
@@ -300,69 +369,6 @@ impl Message {
                 Ok((Self::Batch { flags }, None))
             }
             _ => todo!(),
-        }
-    }
-
-    pub(crate) fn write(&self, bytes: &mut Vec<u8>) -> Result<()> {
-        let mut writer = Writer::new(bytes);
-
-        match self {
-            Message::Query => {
-                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_QUERY)?;
-                Ok(())
-            }
-            Message::Statistics { nrecords } => {
-                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_STATISTICS)?;
-                writer.write_fixed32(*nrecords as u32)?;
-                Ok(())
-            }
-            Message::Require(range) => {
-                let nrecords = range.tail() - range.head() + 1;
-                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_REQUIRE)?;
-                writer.write_fixed32(range.head() as u32)?;
-                writer.write_fixed32(nrecords as u32)?;
-                Ok(())
-            }
-            Message::Records {
-                head,
-                flags,
-                sequence,
-                records,
-            } => {
-                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_RECORDS)?;
-                writer.write_fixed32(*head as u32)?;
-                writer.write_fixed32(*flags)?;
-                writer.write_fixed32(*sequence)?;
-                for record in records {
-                    match record {
-                        Record::Undelimited(bytes) => writer.write_bytes(bytes)?,
-                        Record::Bytes(bytes) => {
-                            // I really wish I could find a better way to do this.
-                            for byte in bytes.iter() {
-                                writer.write_u8(*byte)?;
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Message::Batch { flags } => {
-                writer.write_fixed32(FK_UDP_PROTOCOL_KIND_BATCH)?;
-                writer.write_fixed32(*flags)?;
-                Ok(())
-            }
-        }
-    }
-
-    pub(crate) fn log_received(&self) {
-        match self {
-            Message::Records {
-                head: _head,
-                flags: _flags,
-                sequence: _sequence,
-                records: _records,
-            } => trace!("{:?}", self),
-            _ => info!("{:?}", self),
         }
     }
 }
