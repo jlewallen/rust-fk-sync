@@ -690,11 +690,7 @@ mod tests {
         second: Mutex<Cell<Option<(MessageSender, MessageReceiver)>>>,
     }
 
-    impl TokioTransport {
-        fn new() -> Self {
-            Self::default()
-        }
-    }
+    impl TokioTransport {}
 
     impl Default for TokioTransport {
         fn default() -> Self {
