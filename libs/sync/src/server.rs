@@ -42,7 +42,7 @@ pub enum ServerEvent {
 enum ServerCommand {
     Begin(Discovered),
     Cancel(DeviceId),
-    Received(SocketAddr, Message),
+    Received(TransportMessage),
     Tick,
 }
 
@@ -474,7 +474,8 @@ impl<T: Transport> Server<T> {
 
     #[cfg(test)]
     pub async fn received(&self, addr: SocketAddr, message: Message) -> Result<()> {
-        self.send(ServerCommand::Received(addr, message)).await
+        self.send(ServerCommand::Received(TransportMessage((addr, message))))
+            .await
     }
 
     pub async fn sync(&self, discovered: Discovered) -> Result<()> {
@@ -596,7 +597,7 @@ async fn handle_server_command(
                     .await?;
             }
         }
-        ServerCommand::Received(addr, message) => {
+        ServerCommand::Received(TransportMessage((addr, message))) => {
             message.log_received();
 
             if let Some(device_id) = device_id_by_addr.get(addr) {
@@ -665,19 +666,15 @@ async fn receive_and_process(
     receiving: &mut MessageReceiver,
     tx: &Sender<ServerCommand>,
 ) -> Result<()> {
-    let TransportMessage((addr, message)) = try_receive_one(receiving).await?;
-
-    tx.send(ServerCommand::Received(addr, message)).await?;
-
-    Ok(())
+    Ok(tx
+        .send(ServerCommand::Received(try_receive_one(receiving).await?))
+        .await?)
 }
 
 async fn transmit(tx: &MessageSender, addr: &SocketAddr, m: Message) -> Result<()> {
     info!("{:?} to {:?}", m, addr);
 
-    tx.send(TransportMessage((addr.clone(), m))).await?;
-
-    Ok(())
+    Ok(tx.send(TransportMessage((addr.clone(), m))).await?)
 }
 
 #[cfg(test)]
