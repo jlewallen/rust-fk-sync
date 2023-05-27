@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use backoff::{backoff::Backoff, ExponentialBackoff, ExponentialBackoffBuilder};
 use discovery::{DeviceId, Discovered};
 use range_set_blaze::prelude::*;
@@ -10,9 +11,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::{
-    net::{ToSocketAddrs, UdpSocket},
-    sync::mpsc,
+    net::UdpSocket,
     sync::mpsc::Sender,
+    sync::mpsc::{self, Receiver},
     sync::Mutex,
     time::{self, Instant},
 };
@@ -369,17 +370,111 @@ impl ConnectedDevice {
     }
 }
 
-pub struct Server {
+#[derive(Debug)]
+pub struct TransportMessage((SocketAddr, Message));
+
+pub type MessageReceiver = Receiver<TransportMessage>;
+pub type MessageSender = Sender<TransportMessage>;
+
+#[async_trait]
+pub trait Transport {
+    async fn open(&self) -> Result<(MessageSender, MessageReceiver)>;
+}
+
+pub struct UdpTransport {
     port: u16,
+}
+
+impl UdpTransport {
+    pub fn new() -> Self {
+        Self { port: DEFAULT_PORT }
+    }
+}
+
+#[async_trait]
+impl Transport for UdpTransport {
+    async fn open(&self) -> Result<(MessageSender, MessageReceiver)> {
+        let listening_addr = SocketAddrV4::new(IP_ALL.into(), self.port);
+        let receiving = Arc::new(bind(&listening_addr)?);
+        let sending = receiving.clone();
+
+        info!("listening on {}", listening_addr);
+
+        // This were chosen arbitrarily.
+        let (send_tx, mut send_rx) = mpsc::channel::<TransportMessage>(256);
+        let (recv_tx, recv_rx) = mpsc::channel::<TransportMessage>(256);
+
+        // No amount of investigation into graceful exiting has been done.
+        tokio::spawn(async move {
+            loop {
+                let mut codec = MessageCodec::default();
+                loop {
+                    let mut buffer = vec![0u8; 4096];
+
+                    match receiving.recv_from(&mut buffer[..]).await {
+                        Ok((len, addr)) => {
+                            trace!("{:?} Received {:?}", addr, len);
+
+                            match codec.try_read(&buffer[..len]) {
+                                Ok(Some(message)) => {
+                                    match recv_tx.send(TransportMessage((addr, message))).await {
+                                        Err(e) => warn!("Publish received error: {}", e),
+                                        _ => {}
+                                    }
+
+                                    break;
+                                }
+                                Ok(None) => {}
+                                Err(e) => warn!("Codec error: {}", e),
+                            }
+                        }
+                        Err(e) => warn!("Receive error: {}", e),
+                    }
+                }
+            }
+        });
+
+        // No amount of investigation into graceful exiting has been done.
+        tokio::spawn(async move {
+            while let Some(TransportMessage((addr, message))) = send_rx.recv().await {
+                let mut buffer = Vec::new();
+                match message.write(&mut buffer) {
+                    Ok(_) => {
+                        trace!("{:?} Sending {:?}", addr, buffer.len());
+
+                        match sending.send_to(&buffer, addr).await {
+                            Ok(_) => {}
+                            Err(e) => warn!("Udp send error: {}", e),
+                        }
+                    }
+                    Err(e) => warn!("Codec error: {}", e),
+                }
+            }
+        });
+
+        Ok((send_tx, recv_rx))
+    }
+}
+
+pub struct Server<T>
+where
+    T: Transport,
+{
+    transport: T,
     sender: Arc<Mutex<Option<Sender<ServerCommand>>>>,
 }
 
-impl Server {
-    pub fn new() -> Self {
+impl<T: Transport> Server<T> {
+    pub fn new(transport: T) -> Self {
         Self {
-            port: DEFAULT_PORT,
+            transport,
             sender: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[cfg(test)]
+    pub async fn received(&self, addr: SocketAddr, message: Message) -> Result<()> {
+        self.send(ServerCommand::Received(addr, message)).await
     }
 
     pub async fn sync(&self, discovered: Discovered) -> Result<()> {
@@ -391,11 +486,7 @@ impl Server {
     }
 
     pub async fn run(&self, publish: Sender<ServerEvent>) -> Result<()> {
-        let listening_addr = SocketAddrV4::new(IP_ALL.into(), self.port);
-        let receiving = Arc::new(bind(&listening_addr)?);
-        let sending = receiving.clone();
-
-        info!("listening on {}", listening_addr);
+        let (sending, mut receiving) = self.transport.open().await?;
 
         let mut device_id_by_addr: HashMap<SocketAddr, DeviceId> = HashMap::new();
         let mut devices: HashMap<DeviceId, ConnectedDevice> = HashMap::new();
@@ -427,7 +518,7 @@ impl Server {
 
             async move {
                 loop {
-                    match receive_and_process(&receiving, &tx).await {
+                    match receive_and_process(&mut receiving, &tx).await {
                         Err(e) => warn!("Receive and process error: {}", e),
                         Ok(_) => {}
                     }
@@ -479,7 +570,7 @@ fn bind(addr: &SocketAddrV4) -> Result<UdpSocket> {
 
 async fn handle_server_command(
     cmd: &ServerCommand,
-    sending: &UdpSocket,
+    sending: &MessageSender,
     publish: &Sender<ServerEvent>,
     devices: &mut HashMap<DeviceId, ConnectedDevice>,
     device_id_by_addr: &mut HashMap<SocketAddr, DeviceId>,
@@ -499,7 +590,7 @@ async fn handle_server_command(
                 .or_insert(discovered.device_id.clone());
 
             if let Some(message) = entry.tick(publish).await? {
-                transmit(sending, &udp_addr, &message).await?;
+                transmit(sending, &udp_addr, message).await?;
                 publish
                     .send(ServerEvent::Began(discovered.device_id.clone()))
                     .await?;
@@ -514,7 +605,7 @@ async fn handle_server_command(
                         let reply = connected.handle(publish, message).await?;
 
                         if let Some(reply) = reply {
-                            transmit(sending, &addr, &reply).await?;
+                            transmit(sending, &addr, reply).await?;
                         }
 
                         if let Some(progress) = connected.progress() {
@@ -542,7 +633,7 @@ async fn handle_server_command(
 
             for (_, connected) in devices.iter_mut() {
                 if let Some(message) = connected.tick(publish).await? {
-                    transmit(&sending, &connected.addr, &message).await?;
+                    transmit(&sending, &connected.addr, message).await?;
                 }
             }
         }
@@ -563,54 +654,82 @@ async fn handle_server_command(
     Ok(())
 }
 
-async fn try_receive_one(receiving: &UdpSocket) -> Result<(Message, SocketAddr)> {
-    let mut codec = MessageCodec::default();
-
-    loop {
-        let mut buffer = vec![0u8; 4096];
-
-        let (len, addr) = receiving.recv_from(&mut buffer[..]).await?;
-
-        trace!("{} bytes from {}", len, addr);
-
-        if let Some(message) = codec.try_read(&buffer[..len])? {
-            return Ok((message, addr));
-        }
-    }
+async fn try_receive_one(receiving: &mut MessageReceiver) -> Result<TransportMessage> {
+    Ok(receiving
+        .recv()
+        .await
+        .ok_or_else(|| anyhow!("Expected message"))?)
 }
 
-async fn receive_and_process(receiving: &UdpSocket, tx: &Sender<ServerCommand>) -> Result<()> {
-    let (message, addr) = try_receive_one(receiving).await?;
+async fn receive_and_process(
+    receiving: &mut MessageReceiver,
+    tx: &Sender<ServerCommand>,
+) -> Result<()> {
+    let TransportMessage((addr, message)) = try_receive_one(receiving).await?;
 
     tx.send(ServerCommand::Received(addr, message)).await?;
 
     Ok(())
 }
 
-async fn transmit<A>(tx: &UdpSocket, addr: &A, m: &Message) -> Result<()>
-where
-    A: ToSocketAddrs + std::fmt::Debug,
-{
+async fn transmit(tx: &MessageSender, addr: &SocketAddr, m: Message) -> Result<()> {
     info!("{:?} to {:?}", m, addr);
 
-    let mut buffer = Vec::new();
-    m.write(&mut buffer)?;
-
-    let len = tx.send_to(&buffer, addr).await?;
-    debug!("{:?} bytes to {:?}", len, addr);
+    tx.send(TransportMessage((addr.clone(), m))).await?;
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use tokio::sync::Mutex;
+
     use super::*;
+
+    pub struct TokioTransport {
+        first: Mutex<Cell<Option<(MessageSender, MessageReceiver)>>>,
+        second: Mutex<Cell<Option<(MessageSender, MessageReceiver)>>>,
+    }
+
+    impl TokioTransport {
+        fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    impl Default for TokioTransport {
+        fn default() -> Self {
+            let (inbox_tx, inbox_rx) = mpsc::channel::<TransportMessage>(256);
+            let (outbox_tx, outbox_rx) = mpsc::channel::<TransportMessage>(256);
+
+            Self {
+                first: Mutex::new(Cell::new(Some((inbox_tx, outbox_rx)))),
+                second: Mutex::new(Cell::new(Some((outbox_tx, inbox_rx)))),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Transport for TokioTransport {
+        async fn open(&self) -> Result<(MessageSender, MessageReceiver)> {
+            let second = self.second.lock().await;
+            Ok(second.take().unwrap())
+        }
+    }
 
     fn test_device() -> ConnectedDevice {
         ConnectedDevice::new(
             DeviceId("test-device".to_owned()),
             SocketAddrV4::new(IP_ALL.into(), 22144).into(),
         )
+    }
+
+    #[test]
+    pub fn test_server() {
+        let transport = TokioTransport::default();
+        let server = Server::new(transport);
     }
 
     #[test]
