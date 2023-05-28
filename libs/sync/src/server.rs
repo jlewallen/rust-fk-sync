@@ -50,16 +50,10 @@ enum ServerCommand {
 enum DeviceState {
     Discovered,
     Learning,
+    Required(RecordRange),
     Receiving(RecordRange),
-    Expecting((f32, Box<DeviceState>)),
     Synced,
     Failed,
-}
-
-impl DeviceState {
-    fn expecting(after: Self) -> Self {
-        Self::Expecting((0.0, Box::new(after)))
-    }
 }
 
 #[derive(Debug)]
@@ -121,8 +115,7 @@ impl ConnectedDevice {
             DeviceState::Discovered => {
                 self.received.clear();
 
-                let new_state = DeviceState::expecting(DeviceState::Learning);
-                Ok(Transition::Send(Message::Query, new_state))
+                Ok(Transition::Send(Message::Query, DeviceState::Learning))
             }
             DeviceState::Failed => Ok(Transition::None),
             _ => {
@@ -155,18 +148,10 @@ impl ConnectedDevice {
         }
     }
 
-    async fn handle(
-        &mut self,
-        publish: &Sender<ServerEvent>,
-        message: &Message,
-    ) -> Result<Transition> {
+    fn handle(&mut self, message: &Message) -> Result<Transition> {
         self.received_at = Instant::now();
         self.backoff.reset();
         self.waiting_until = None;
-
-        if let DeviceState::Expecting((_deadline, after)) = &self.state {
-            self.transition(*Box::clone(after), publish).await?; // TODO into_inner on unstable
-        }
 
         match message {
             Message::Statistics { nrecords } => {
@@ -192,7 +177,12 @@ impl ConnectedDevice {
                 let progress = progress.map_or("".to_owned(), |f| format!("{:?}", f));
                 trace!("{} {:?}", progress, &has_gaps);
 
-                Ok(Transition::None)
+                match &self.state {
+                    DeviceState::Required(range) => {
+                        Ok(Transition::Direct(DeviceState::Receiving(range.clone())))
+                    }
+                    _ => Ok(Transition::None),
+                }
             }
             Message::Batch { flags: _flags } => self.query_requires(),
             _ => Ok(Transition::None),
@@ -201,7 +191,7 @@ impl ConnectedDevice {
 
     fn query_requires(&mut self) -> Result<Transition> {
         if let Some(range) = self.requires() {
-            let new_state = DeviceState::expecting(DeviceState::Receiving(range.clone()));
+            let new_state = DeviceState::Required(range.clone());
             Ok(Transition::Send(Message::Require(range), new_state))
         } else {
             if self.total_records.is_some() {
@@ -283,7 +273,7 @@ impl ConnectedDevice {
         }
 
         match &self.state {
-            DeviceState::Expecting(_) => {
+            DeviceState::Learning | DeviceState::Required(_) => {
                 self.last_received_at() > Duration::from_millis(STALLED_EXPECTING_MILLIS)
             }
             DeviceState::Receiving(_) => {
@@ -370,6 +360,11 @@ impl ConnectedDevice {
         match (&self.state, &new) {
             (DeviceState::Synced, _) => {}
             (DeviceState::Failed, _) => {}
+            (_, DeviceState::Learning) => {
+                publish
+                    .send(ServerEvent::Began(self.device_id.clone()))
+                    .await?;
+            }
             (_, DeviceState::Synced) => {
                 publish
                     .send(ServerEvent::Completed(self.device_id.clone()))
@@ -393,25 +388,25 @@ impl ConnectedDevice {
         transition: Transition,
         publish: &Sender<ServerEvent>,
         sender: &MessageSender,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         match transition {
-            Transition::None => Ok(false),
+            Transition::None => Ok(()),
             Transition::Direct(state) => {
                 self.transition(state, publish).await?;
 
-                Ok(true)
+                Ok(())
             }
             Transition::SendOnly(sending) => {
                 transmit(sender, &self.addr, sending).await?;
 
-                Ok(true)
+                Ok(())
             }
             Transition::Send(sending, state) => {
                 transmit(sender, &self.addr, sending).await?;
 
                 self.transition(state, publish).await?;
 
-                Ok(true)
+                Ok(())
             }
         }
     }
@@ -638,16 +633,7 @@ async fn handle_server_command(
                 .or_insert(discovered.device_id.clone());
 
             let transition = entry.tick()?;
-            if entry.apply(transition, publish, sending).await? {
-                publish
-                    .send(ServerEvent::Began(discovered.device_id.clone()))
-                    .await?;
-            }
-            /*
-            if let Some(message) = entry.tick(publish).await? {
-                transmit(sending, &udp_addr, message).await?;
-            }
-            */
+            entry.apply(transition, publish, sending).await?
         }
         ServerCommand::Received(TransportMessage((addr, message))) => {
             message.log_received();
@@ -655,7 +641,7 @@ async fn handle_server_command(
             if let Some(device_id) = device_id_by_addr.get(addr) {
                 match devices.get_mut(device_id) {
                     Some(connected) => {
-                        let transition = connected.handle(publish, message).await?;
+                        let transition = connected.handle(message)?;
                         connected.apply(transition, publish, sending).await?;
 
                         if let Some(progress) = connected.progress() {
@@ -684,11 +670,6 @@ async fn handle_server_command(
             for (_, connected) in devices.iter_mut() {
                 let transition = connected.tick()?;
                 connected.apply(transition, publish, sending).await?;
-                /*
-                if let Some(message) = connected.tick(publish).await? {
-                    transmit(&sending, &connected.addr, message).await?;
-                }
-                */
             }
         }
         ServerCommand::Cancel(device_id) => {
