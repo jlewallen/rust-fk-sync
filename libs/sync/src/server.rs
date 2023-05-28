@@ -82,6 +82,15 @@ struct ConnectedDevice {
     syncing_started: Option<SystemTime>,
 }
 
+#[derive(Debug)]
+#[allow(dead_code)]
+enum Transition {
+    None,
+    Direct(DeviceState),
+    SendOnly(Message),
+    Send(Message, DeviceState),
+}
+
 impl ConnectedDevice {
     fn new(device_id: DeviceId, addr: SocketAddr) -> Self {
         Self {
@@ -107,15 +116,15 @@ impl ConnectedDevice {
             .build()
     }
 
-    async fn tick(&mut self, publish: &Sender<ServerEvent>) -> Result<Option<Message>> {
+    fn tick(&mut self) -> Result<Transition> {
         match &self.state {
             DeviceState::Discovered => {
                 self.received.clear();
-                self.transition(DeviceState::expecting(DeviceState::Learning));
 
-                Ok(Some(Message::Query))
+                let new_state = DeviceState::expecting(DeviceState::Learning);
+                Ok(Transition::Send(Message::Query, new_state))
             }
-            DeviceState::Failed => Ok(None),
+            DeviceState::Failed => Ok(Transition::None),
             _ => {
                 if self.is_stalled() {
                     if let Some(delay) = self.backoff.next_backoff() {
@@ -128,7 +137,7 @@ impl ConnectedDevice {
 
                         self.waiting_until = Some(Instant::now() + delay);
 
-                        self.query_requires(publish).await
+                        self.query_requires()
                     } else {
                         info!(
                             "{:?} FAILED {:?} {:?}",
@@ -137,16 +146,10 @@ impl ConnectedDevice {
                             self.received_has_gaps()
                         );
 
-                        self.transition(DeviceState::Failed);
-
-                        publish
-                            .send(ServerEvent::Failed(self.device_id.clone()))
-                            .await?;
-
-                        Ok(None)
+                        Ok(Transition::Direct(DeviceState::Failed))
                     }
                 } else {
-                    Ok(None)
+                    Ok(Transition::None)
                 }
             }
         }
@@ -156,20 +159,20 @@ impl ConnectedDevice {
         &mut self,
         publish: &Sender<ServerEvent>,
         message: &Message,
-    ) -> Result<Option<Message>> {
+    ) -> Result<Transition> {
         self.received_at = Instant::now();
         self.backoff.reset();
         self.waiting_until = None;
 
         if let DeviceState::Expecting((_deadline, after)) = &self.state {
-            self.transition(*Box::clone(after)) // TODO into_inner on unstable
+            self.transition(*Box::clone(after), publish).await?; // TODO into_inner on unstable
         }
 
         match message {
             Message::Statistics { nrecords } => {
                 self.total_records = Some(*nrecords);
                 self.syncing_started = Some(SystemTime::now());
-                self.query_requires(publish).await
+                self.query_requires()
             }
             Message::Records {
                 head,
@@ -189,29 +192,26 @@ impl ConnectedDevice {
                 let progress = progress.map_or("".to_owned(), |f| format!("{:?}", f));
                 trace!("{} {:?}", progress, &has_gaps);
 
-                Ok(None)
+                Ok(Transition::None)
             }
-            Message::Batch { flags: _flags } => self.query_requires(publish).await,
-            _ => Ok(None),
+            Message::Batch { flags: _flags } => self.query_requires(),
+            _ => Ok(Transition::None),
         }
     }
 
-    async fn query_requires(&mut self, publish: &Sender<ServerEvent>) -> Result<Option<Message>> {
+    fn query_requires(&mut self) -> Result<Transition> {
         if let Some(range) = self.requires() {
-            self.transition(DeviceState::expecting(DeviceState::Receiving(
-                range.clone(),
-            )));
-            Ok(Some(Message::Require(range)))
+            let new_state = DeviceState::expecting(DeviceState::Receiving(range.clone()));
+            Ok(Transition::Send(Message::Require(range), new_state))
         } else {
             if self.total_records.is_some() {
-                self.transition(DeviceState::Synced);
                 let elapsed = SystemTime::now().duration_since(self.syncing_started.unwrap())?;
                 info!("Syncing took {:?}", elapsed);
-                publish
-                    .send(ServerEvent::Completed(self.device_id.clone()))
-                    .await?;
+
+                Ok(Transition::Direct(DeviceState::Synced))
+            } else {
+                Ok(Transition::None)
             }
-            Ok(None)
         }
     }
 
@@ -255,11 +255,6 @@ impl ConnectedDevice {
         }
 
         requiring.map(RecordRange)
-    }
-
-    fn transition(&mut self, new: DeviceState) {
-        info!("{:?} -> {:?}", self.state, new);
-        self.state = new;
     }
 
     fn received(&mut self, records: RangeSetBlaze<u64>) {
@@ -366,6 +361,58 @@ impl ConnectedDevice {
                 batch: self.batch(),
             }),
             _ => None,
+        }
+    }
+
+    async fn transition(&mut self, new: DeviceState, publish: &Sender<ServerEvent>) -> Result<()> {
+        info!("{:?} -> {:?}", &self.state, &new);
+
+        match (&self.state, &new) {
+            (DeviceState::Synced, _) => {}
+            (DeviceState::Failed, _) => {}
+            (_, DeviceState::Synced) => {
+                publish
+                    .send(ServerEvent::Completed(self.device_id.clone()))
+                    .await?;
+            }
+            (_, DeviceState::Failed) => {
+                publish
+                    .send(ServerEvent::Failed(self.device_id.clone()))
+                    .await?;
+            }
+            (_, _) => {}
+        }
+
+        self.state = new;
+
+        Ok(())
+    }
+
+    async fn apply(
+        &mut self,
+        transition: Transition,
+        publish: &Sender<ServerEvent>,
+        sender: &MessageSender,
+    ) -> Result<bool> {
+        match transition {
+            Transition::None => Ok(false),
+            Transition::Direct(state) => {
+                self.transition(state, publish).await?;
+
+                Ok(true)
+            }
+            Transition::SendOnly(sending) => {
+                transmit(sender, &self.addr, sending).await?;
+
+                Ok(true)
+            }
+            Transition::Send(sending, state) => {
+                transmit(sender, &self.addr, sending).await?;
+
+                self.transition(state, publish).await?;
+
+                Ok(true)
+            }
         }
     }
 }
@@ -590,12 +637,17 @@ async fn handle_server_command(
                 .entry(udp_addr)
                 .or_insert(discovered.device_id.clone());
 
-            if let Some(message) = entry.tick(publish).await? {
-                transmit(sending, &udp_addr, message).await?;
+            let transition = entry.tick()?;
+            if entry.apply(transition, publish, sending).await? {
                 publish
                     .send(ServerEvent::Began(discovered.device_id.clone()))
                     .await?;
             }
+            /*
+            if let Some(message) = entry.tick(publish).await? {
+                transmit(sending, &udp_addr, message).await?;
+            }
+            */
         }
         ServerCommand::Received(TransportMessage((addr, message))) => {
             message.log_received();
@@ -603,11 +655,8 @@ async fn handle_server_command(
             if let Some(device_id) = device_id_by_addr.get(addr) {
                 match devices.get_mut(device_id) {
                     Some(connected) => {
-                        let reply = connected.handle(publish, message).await?;
-
-                        if let Some(reply) = reply {
-                            transmit(sending, &addr, reply).await?;
-                        }
+                        let transition = connected.handle(publish, message).await?;
+                        connected.apply(transition, publish, sending).await?;
 
                         if let Some(progress) = connected.progress() {
                             let started = connected.syncing_started.unwrap_or(SystemTime::now());
@@ -633,9 +682,13 @@ async fn handle_server_command(
             }
 
             for (_, connected) in devices.iter_mut() {
+                let transition = connected.tick()?;
+                connected.apply(transition, publish, sending).await?;
+                /*
                 if let Some(message) = connected.tick(publish).await? {
                     transmit(&sending, &connected.addr, message).await?;
                 }
+                */
             }
         }
         ServerCommand::Cancel(device_id) => {
@@ -685,6 +738,7 @@ mod tests {
 
     use super::*;
 
+    #[allow(dead_code)]
     pub struct TokioTransport {
         first: Mutex<Cell<Option<(MessageSender, MessageReceiver)>>>,
         second: Mutex<Cell<Option<(MessageSender, MessageReceiver)>>>,
@@ -722,7 +776,7 @@ mod tests {
     #[test]
     pub fn test_server() {
         let transport = TokioTransport::default();
-        let server = Server::new(transport);
+        let _server = Server::new(transport);
     }
 
     #[test]
