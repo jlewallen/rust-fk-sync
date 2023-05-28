@@ -36,6 +36,10 @@ async fn main() -> Result<()> {
     fn get_rust_log() -> String {
         let mut original = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
 
+        if !original.contains("transfer-progress=") {
+            original.push_str(",transfer-progress=trace");
+        }
+
         if !original.contains("hyper=") {
             original.push_str(",hyper=info");
         }

@@ -175,7 +175,7 @@ impl ConnectedDevice {
                 let progress = self.progress();
                 let has_gaps = self.received_has_gaps();
                 let progress = progress.map_or("".to_owned(), |f| format!("{:?}", f));
-                trace!("{} {:?}", progress, &has_gaps);
+                trace!(target: "transfer-progress", "{} {:?}", progress, &has_gaps);
 
                 match &self.state {
                     DeviceState::Required(range) => {
