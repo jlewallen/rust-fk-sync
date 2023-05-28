@@ -1,10 +1,28 @@
 use std::ops::RangeInclusive;
 
+use range_set_blaze::RangeSetBlaze;
+
 pub struct RangeProgress {
     pub range: RangeInclusive<u64>,
     pub completed: f32,
     pub total: usize,
     pub received: usize,
+}
+
+impl RangeProgress {
+    pub fn new(range: RangeInclusive<u64>, received: &RangeSetBlaze<u64>) -> Self {
+        let range_set = RangeSetBlaze::from_iter([range.clone()]);
+        let total = range_set.len() as usize;
+        let received_set = received & range_set;
+        let received = received_set.len() as usize;
+        let completed = received as f32 / total as f32;
+        Self {
+            range,
+            completed,
+            total,
+            received,
+        }
+    }
 }
 
 impl std::fmt::Debug for RangeProgress {

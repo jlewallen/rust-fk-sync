@@ -112,12 +112,12 @@ impl ConnectedDevice {
 
     fn tick(&mut self) -> Result<Transition> {
         match &self.state {
+            DeviceState::Synced | DeviceState::Failed => Ok(Transition::None),
             DeviceState::Discovered => {
                 self.received.clear();
 
                 Ok(Transition::Send(Message::Query, DeviceState::Learning))
             }
-            DeviceState::Failed => Ok(Transition::None),
             _ => {
                 if self.is_stalled() {
                     if let Some(delay) = self.backoff.next_backoff() {
@@ -303,22 +303,7 @@ impl ConnectedDevice {
 
     fn completed(&self) -> Option<RangeProgress> {
         if let Some(total) = self.total_records {
-            let range = 0..=(total - 1);
-            let complete = RangeSetBlaze::from_iter([range.clone()]);
-            let total = complete.len() as usize;
-            let received = self.received.len() as usize;
-            let completed = received as f32 / total as f32;
-            // We can receive more records than we ask for and this is probably
-            // better than excluding them since, well, we do have those extra
-            // records haha
-            let completed = if completed > 1.0 { 1.0 } else { completed };
-
-            Some(RangeProgress {
-                range,
-                completed,
-                total,
-                received,
-            })
+            Some(RangeProgress::new(0..=(total - 1), &self.received))
         } else {
             None
         }
@@ -327,18 +312,7 @@ impl ConnectedDevice {
     fn batch(&self) -> Option<RangeProgress> {
         match &self.state {
             DeviceState::Receiving(range) => {
-                let receiving = range.to_set();
-                let remaining = &receiving - &self.received;
-                let total = receiving.len() as usize;
-                let received = total - remaining.len() as usize;
-                let completed = received as f32 / total as f32;
-
-                Some(RangeProgress {
-                    range: range.clone().into(),
-                    completed,
-                    total,
-                    received,
-                })
+                Some(RangeProgress::new(range.0.clone(), &self.received))
             }
             _ => None,
         }
