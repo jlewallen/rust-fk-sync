@@ -505,8 +505,7 @@ impl<T: Transport> Server<T> {
     pub async fn run(&self, publish: Sender<ServerEvent>) -> Result<()> {
         let (sending, mut receiving) = self.transport.open().await?;
 
-        let mut device_id_by_addr: HashMap<SocketAddr, DeviceId> = HashMap::new();
-        let mut devices: HashMap<DeviceId, ConnectedDevice> = HashMap::new();
+        let mut devices = Devices::new();
         let (tx, mut rx) = mpsc::channel::<ServerCommand>(1024);
 
         let pump = tokio::spawn({
@@ -514,15 +513,7 @@ impl<T: Transport> Server<T> {
             *locked = Some(tx.clone());
             async move {
                 while let Some(cmd) = rx.recv().await {
-                    match handle_server_command(
-                        &cmd,
-                        &sending,
-                        &publish,
-                        &mut devices,
-                        &mut device_id_by_addr,
-                    )
-                    .await
-                    {
+                    match handle_server_command(&cmd, &sending, &publish, &mut devices).await {
                         Ok(_) => {}
                         Err(e) => warn!("Server command error: {}", e),
                     }
@@ -585,12 +576,73 @@ fn bind(addr: &SocketAddrV4) -> Result<UdpSocket> {
     Ok(UdpSocket::from_std(socket.into())?)
 }
 
+struct Devices {
+    devices: HashMap<DeviceId, ConnectedDevice>,
+    by_addr: HashMap<SocketAddr, DeviceId>,
+}
+
+impl Devices {
+    fn new() -> Self {
+        Self {
+            devices: HashMap::new(),
+            by_addr: HashMap::new(),
+        }
+    }
+    fn get_or_add_device(
+        &mut self,
+        device_id: DeviceId,
+        addr: SocketAddr,
+    ) -> Option<&mut ConnectedDevice> {
+        let entry = self.devices.entry(device_id.clone());
+        let entry = entry.or_insert_with(|| ConnectedDevice::new(device_id.clone(), addr));
+
+        self.by_addr.entry(addr).or_insert(device_id.clone());
+
+        Some(entry)
+    }
+
+    fn get_device_by_addr(&mut self, addr: &SocketAddr) -> Option<&mut ConnectedDevice> {
+        if let Some(device_id) = self.by_addr.get(addr) {
+            self.devices.get_mut(device_id)
+        } else {
+            None
+        }
+    }
+
+    fn remove_expired(&mut self) {
+        for (device_id, addr) in self
+            .devices
+            .iter()
+            .filter(|(_, connected)| connected.is_expired())
+            .map(|(device_id, connected)| (device_id.clone(), connected.addr))
+            .collect::<Vec<_>>()
+        {
+            info!("{:?}@{:?} expired", device_id, addr);
+            self.by_addr.remove(&addr);
+            self.devices.remove(&device_id);
+        }
+    }
+
+    fn iter(&mut self) -> impl Iterator<Item = &mut ConnectedDevice> {
+        self.devices.iter_mut().map(|(_, c)| c)
+    }
+
+    fn remove(&mut self, device_id: &DeviceId) -> Option<ConnectedDevice> {
+        if let Some((_, connected)) = self.devices.remove_entry(device_id) {
+            info!("{:?} removed", device_id);
+            self.by_addr.remove(&connected.addr);
+            Some(connected)
+        } else {
+            None
+        }
+    }
+}
+
 async fn handle_server_command(
     cmd: &ServerCommand,
     sending: &MessageSender,
     publish: &Sender<ServerEvent>,
-    devices: &mut HashMap<DeviceId, ConnectedDevice>,
-    device_id_by_addr: &mut HashMap<SocketAddr, DeviceId>,
+    devices: &mut Devices,
 ) -> Result<()> {
     match cmd {
         ServerCommand::Begin(discovered) => {
@@ -598,64 +650,51 @@ async fn handle_server_command(
                 .udp_addr
                 .ok_or(anyhow::anyhow!("Udp address is required"))?;
 
-            let entry = devices.entry(discovered.device_id.clone());
-            let entry = entry
-                .or_insert_with(|| ConnectedDevice::new(discovered.device_id.clone(), udp_addr));
-
-            device_id_by_addr
-                .entry(udp_addr)
-                .or_insert(discovered.device_id.clone());
-
-            let transition = entry.tick()?;
-            entry.apply(transition, publish, sending).await?
+            match devices.get_or_add_device(discovered.device_id.clone(), udp_addr) {
+                Some(connected) => {
+                    let transition = connected.tick()?;
+                    connected.apply(transition, publish, sending).await?
+                }
+                None => {}
+            }
         }
         ServerCommand::Received(TransportMessage((addr, message))) => {
             message.log_received();
 
-            if let Some(device_id) = device_id_by_addr.get(addr) {
-                match devices.get_mut(device_id) {
-                    Some(connected) => {
-                        let transition = connected.handle(message)?;
-                        connected.apply(transition, publish, sending).await?;
+            match devices.get_device_by_addr(addr) {
+                Some(connected) => {
+                    let transition = connected.handle(message)?;
+                    connected.apply(transition, publish, sending).await?;
 
-                        if let Some(progress) = connected.progress() {
-                            let started = connected.syncing_started.unwrap_or(SystemTime::now());
-                            publish
-                                .send(ServerEvent::Progress(device_id.clone(), started, progress))
-                                .await?;
-                        }
+                    if let Some(progress) = connected.progress() {
+                        let started = connected.syncing_started.unwrap_or(SystemTime::now());
+                        publish
+                            .send(ServerEvent::Progress(
+                                connected.device_id.clone(),
+                                started,
+                                progress,
+                            ))
+                            .await?;
                     }
-                    None => todo!(),
                 }
-            };
+                None => todo!(),
+            }
         }
         ServerCommand::Tick => {
-            for (device_id, addr) in devices
-                .iter()
-                .filter(|(_, connected)| connected.is_expired())
-                .map(|(device_id, connected)| (device_id.clone(), connected.addr))
-                .collect::<Vec<_>>()
-            {
-                info!("{:?}@{:?} expired", device_id, addr);
-                device_id_by_addr.remove(&addr);
-                devices.remove(&device_id);
-            }
+            devices.remove_expired();
 
-            for (_, connected) in devices.iter_mut() {
+            for connected in devices.iter() {
                 let transition = connected.tick()?;
                 connected.apply(transition, publish, sending).await?;
             }
         }
         ServerCommand::Cancel(device_id) => {
-            if let Some(connected) = devices.remove_entry(device_id) {
+            if let Some(connected) = devices.remove(device_id) {
                 info!("{:?} removed", device_id);
-                device_id_by_addr.remove(&connected.1.addr);
-                match connected.1.state {
+                match connected.state {
                     DeviceState::Synced => {}
                     _ => publish.send(ServerEvent::Failed(device_id.clone())).await?,
                 }
-            } else {
-                info!("{:?} unknown", device_id);
             }
         }
     }
