@@ -505,10 +505,10 @@ impl<T: Transport> Server<T> {
     pub async fn run(&self, publish: Sender<ServerEvent>) -> Result<()> {
         let (sending, mut receiving) = self.transport.open().await?;
 
-        let mut devices = Devices::new();
         let (tx, mut rx) = mpsc::channel::<ServerCommand>(1024);
 
         let pump = tokio::spawn({
+            let mut devices = Devices::new();
             let mut locked = self.sender.lock().await;
             *locked = Some(tx.clone());
             async move {
@@ -526,7 +526,7 @@ impl<T: Transport> Server<T> {
 
             async move {
                 loop {
-                    match receive_and_process(&mut receiving, &tx).await {
+                    match receive_and_send(&mut receiving, &tx).await {
                         Err(e) => warn!("Receive and process error: {}", e),
                         Ok(_) => {}
                     }
@@ -702,20 +702,16 @@ async fn handle_server_command(
     Ok(())
 }
 
-async fn try_receive_one(receiving: &mut MessageReceiver) -> Result<TransportMessage> {
-    Ok(receiving
-        .recv()
-        .await
-        .ok_or_else(|| anyhow!("Expected message"))?)
-}
-
-async fn receive_and_process(
+async fn receive_and_send(
     receiving: &mut MessageReceiver,
     tx: &Sender<ServerCommand>,
 ) -> Result<()> {
-    Ok(tx
-        .send(ServerCommand::Received(try_receive_one(receiving).await?))
-        .await?)
+    let received = receiving
+        .recv()
+        .await
+        .ok_or_else(|| anyhow!("Expected message"))?;
+
+    Ok(tx.send(ServerCommand::Received(received)).await?)
 }
 
 async fn transmit(tx: &MessageSender, addr: &SocketAddr, m: Message) -> Result<()> {
