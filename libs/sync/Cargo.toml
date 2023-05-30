@@ -7,6 +7,9 @@ edition = "2021"
 [dependencies.discovery]
 path = "../discovery"
 
+[dev-dependencies]
+tempdir = "0.3.7"
+
 [dependencies]
 anyhow = "1.0.66"
 async-trait = "0.1.68"

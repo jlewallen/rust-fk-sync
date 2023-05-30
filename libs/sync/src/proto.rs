@@ -48,6 +48,10 @@ impl NumberedRecord {
     pub fn new(number: u64, record: Record) -> Self {
         Self { number, record }
     }
+
+    pub fn bytes(&self) -> &[u8] {
+        self.record.bytes()
+    }
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -68,10 +72,18 @@ impl std::fmt::Debug for Record {
 }
 
 impl Record {
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Record::Undelimited(bytes) => bytes,
+            #[cfg(test)]
+            Record::Bytes(bytes) => bytes,
+        }
+    }
+
     #[cfg(test)]
-    pub fn new_all_zeros(len: usize) -> Result<Self> {
+    pub fn new_all_zeros(len: usize) -> Self {
         let zeros: Vec<u8> = std::iter::repeat(0 as u8).take(len).collect();
-        Ok(Self::Undelimited(zeros))
+        Self::Undelimited(zeros)
     }
 
     #[cfg(test)]
@@ -441,8 +453,8 @@ mod tests {
 
     #[test]
     pub fn test_serialization_records_simple() -> Result<()> {
-        let r1 = Record::new_all_zeros(166)?;
-        let r2 = Record::new_all_zeros(212)?;
+        let r1 = Record::new_all_zeros(166);
+        let r2 = Record::new_all_zeros(212);
         let records = vec![r1, r2];
         let message = Message::Records {
             head: 32768,
@@ -470,7 +482,7 @@ mod tests {
 
     #[test]
     pub fn test_serialization_records_partial() -> Result<()> {
-        let original = Record::new_all_zeros(1024)?;
+        let original = Record::new_all_zeros(1024);
         let r1 = original.clone().into_delimited()?;
         let (first, second) = r1.split_off(386);
 

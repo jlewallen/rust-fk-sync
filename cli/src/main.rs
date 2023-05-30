@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use query::portal::{LoginPayload, PortalError, Tokens};
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use tokio::{signal, sync::mpsc};
 use tracing::*;
 use tracing_subscriber::prelude::*;
 
 use discovery::{DeviceId, Discovered, Discovery};
-use sync::{DevNullSink, Server, ServerEvent, UdpTransport};
+use sync::{FilesRecordSink, Server, ServerEvent, UdpTransport};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -107,7 +107,10 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Sync(command)) => {
             let (transfer_publish, mut transfer_events) = mpsc::channel::<ServerEvent>(32);
-            let server = Arc::new(Server::new(UdpTransport::new(), DevNullSink::default()));
+            let server = Arc::new(Server::new(
+                UdpTransport::new(),
+                FilesRecordSink::new(&Path::new("fk-data")),
+            ));
             let discovery = Discovery::default();
             let (tx, mut rx) = mpsc::channel::<Discovered>(32);
 

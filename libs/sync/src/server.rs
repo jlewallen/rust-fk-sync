@@ -390,6 +390,24 @@ pub struct ReceivedRecords {
     pub records: Vec<NumberedRecord>,
 }
 
+impl ReceivedRecords {
+    // Note that ReceivedRecords are always sequential, as they're constructed
+    // from incoming packets.
+    pub fn range(&self) -> Option<RangeInclusive<u64>> {
+        let numbers = self.records.iter().map(|r| r.number);
+        let first = numbers.clone().min();
+        let last = numbers.max();
+        match (first, last) {
+            (Some(first), Some(last)) => Some(first..=last),
+            _ => None,
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &NumberedRecord> {
+        self.records.iter()
+    }
+}
+
 pub trait RecordsSink: Send + Sync {
     fn write(&self, records: &ReceivedRecords) -> Result<()>;
 }
