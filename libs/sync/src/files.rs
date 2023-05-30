@@ -1,21 +1,31 @@
 use anyhow::{anyhow, Context, Result};
 use discovery::DeviceId;
 use std::{
-    fs::File,
+    collections::HashMap,
+    fs::OpenOptions,
     io::Write,
+    ops::RangeInclusive,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use crate::{server::ReceivedRecords, RecordsSink};
 
+struct Previous {
+    path: PathBuf,
+    range: RangeInclusive<u64>,
+}
+
 pub struct FilesRecordSink {
     base_path: PathBuf,
+    previous: Mutex<HashMap<DeviceId, Previous>>,
 }
 
 impl FilesRecordSink {
     pub fn new(base_path: &Path) -> Self {
         Self {
             base_path: base_path.to_owned(),
+            previous: Default::default(),
         }
     }
 
@@ -26,24 +36,67 @@ impl FilesRecordSink {
 
         Ok(path)
     }
-}
 
-impl RecordsSink for FilesRecordSink {
-    fn write(&self, records: &ReceivedRecords) -> Result<()> {
-        let device_path = self
-            .device_path(&records.device_id)
-            .with_context(|| format!("Resolving device path {:?}", &records.device_id))?;
+    fn append(&self, records: &ReceivedRecords, file_path: &PathBuf) -> Result<()> {
+        // We'll usually be in a tokio context......
+        let mut writing = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(file_path)
+            .with_context(|| format!("Creating {:?}", &file_path))?;
+
+        for record in records.iter() {
+            writing.write(record.bytes())?;
+        }
+
+        Ok(())
+    }
+
+    fn create_new(&self, records: &ReceivedRecords) -> Result<PathBuf> {
         let range = records
             .range()
             .ok_or(anyhow!("No range on received records"))?;
 
+        let device_path = self
+            .device_path(&records.device_id)
+            .with_context(|| format!("Resolving device path {:?}", &records.device_id))?;
+
         let file_path = device_path.join(format!("{}.fkpb", range.start()));
 
-        // We'll usually be in a tokio context......
-        let mut writing = File::create(file_path.clone())
-            .with_context(|| format!("Creating {:?}", &file_path))?;
-        for record in records.iter() {
-            writing.write(record.bytes())?;
+        self.append(records, &file_path)?;
+
+        Ok(file_path)
+    }
+}
+
+impl RecordsSink for FilesRecordSink {
+    fn write(&self, records: &ReceivedRecords) -> Result<()> {
+        let range = records
+            .range()
+            .ok_or(anyhow!("No range on received records"))?;
+
+        let mut previous = self.previous.lock().expect("Lock error");
+        let consecutive = previous
+            .get_mut(&records.device_id)
+            .map(|p| (*range.start() == *p.range.end() + 1, p));
+
+        match consecutive {
+            Some((true, previous)) => {
+                self.append(records, &previous.path)?;
+
+                previous.range = *previous.range.start()..=*range.end()
+            }
+            Some((false, _)) | None => {
+                let file_path = self.create_new(records)?;
+
+                previous.insert(
+                    records.device_id.clone(),
+                    Previous {
+                        path: file_path,
+                        range,
+                    },
+                );
+            }
         }
 
         Ok(())
