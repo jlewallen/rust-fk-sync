@@ -21,7 +21,7 @@ use tracing::*;
 
 use crate::{
     progress::{Progress, RangeProgress},
-    proto::{Message, MessageCodec, RecordRange},
+    proto::{Message, MessageCodec, NumberedRecord, RecordRange},
 };
 
 const IP_ALL: [u8; 4] = [0, 0, 0, 0];
@@ -62,7 +62,6 @@ enum HasGaps {
     HasGaps(RangeInclusive<u64>, Vec<RangeInclusive<u64>>),
 }
 
-#[derive(Debug)]
 struct ConnectedDevice {
     device_id: DeviceId,
     addr: SocketAddr,
@@ -386,6 +385,24 @@ impl ConnectedDevice {
     }
 }
 
+pub struct ReceivedRecords {
+    pub device_id: DeviceId,
+    pub records: Vec<NumberedRecord>,
+}
+
+pub trait RecordsSink: Send + Sync {
+    fn write(&self, records: &ReceivedRecords) -> Result<()>;
+}
+
+#[derive(Default)]
+pub struct DevNullSink {}
+
+impl RecordsSink for DevNullSink {
+    fn write(&self, _records: &ReceivedRecords) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct TransportMessage((SocketAddr, Message));
 
@@ -472,18 +489,21 @@ impl Transport for UdpTransport {
     }
 }
 
-pub struct Server<T>
+pub struct Server<T, R>
 where
     T: Transport,
+    R: RecordsSink,
 {
     transport: T,
+    records_sink: Arc<Mutex<R>>,
     sender: Arc<Mutex<Option<Sender<ServerCommand>>>>,
 }
 
-impl<T: Transport> Server<T> {
-    pub fn new(transport: T) -> Self {
+impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
+    pub fn new(transport: T, records_sink: R) -> Self {
         Self {
             transport,
+            records_sink: Arc::new(Mutex::new(records_sink)),
             sender: Arc::new(Mutex::new(None)),
         }
     }
@@ -507,13 +527,23 @@ impl<T: Transport> Server<T> {
 
         let (tx, mut rx) = mpsc::channel::<ServerCommand>(1024);
 
+        let records_sink = Arc::clone(&self.records_sink);
+
         let pump = tokio::spawn({
             let mut devices = Devices::new();
             let mut locked = self.sender.lock().await;
             *locked = Some(tx.clone());
             async move {
                 while let Some(cmd) = rx.recv().await {
-                    match handle_server_command(&cmd, &sending, &publish, &mut devices).await {
+                    match handle_server_command::<R>(
+                        &cmd,
+                        &sending,
+                        &publish,
+                        &mut devices,
+                        &records_sink,
+                    )
+                    .await
+                    {
                         Ok(_) => {}
                         Err(e) => warn!("Server command error: {}", e),
                     }
@@ -638,11 +668,12 @@ impl Devices {
     }
 }
 
-async fn handle_server_command(
+async fn handle_server_command<R: RecordsSink>(
     cmd: &ServerCommand,
     sending: &MessageSender,
     publish: &Sender<ServerEvent>,
     devices: &mut Devices,
+    records_sink: &Arc<Mutex<R>>,
 ) -> Result<()> {
     match cmd {
         ServerCommand::Begin(discovered) => {
@@ -665,6 +696,14 @@ async fn handle_server_command(
                 Some(connected) => {
                     let transition = connected.handle(message)?;
                     connected.apply(transition, publish, sending).await?;
+
+                    if let Some(records) = message.numbered_records()? {
+                        let sink = records_sink.lock().await;
+                        sink.write(&ReceivedRecords {
+                            device_id: connected.device_id.clone(),
+                            records,
+                        })?;
+                    }
 
                     if let Some(progress) = connected.progress() {
                         let started = connected.syncing_started.unwrap_or(SystemTime::now());
@@ -766,7 +805,7 @@ mod tests {
     #[test]
     pub fn test_server() {
         let transport = TokioTransport::default();
-        let _server = Server::new(transport);
+        let _server = Server::new(transport, DevNullSink::default());
     }
 
     #[test]

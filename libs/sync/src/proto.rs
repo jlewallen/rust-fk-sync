@@ -250,20 +250,21 @@ impl MessageCodec {
 }
 
 impl Message {
-    #[allow(dead_code)]
-    pub fn numbered_records(self) -> Result<Vec<NumberedRecord>> {
+    pub fn numbered_records(&self) -> Result<Option<Vec<NumberedRecord>>> {
         match self {
             Message::Records {
                 head,
                 flags: _,
                 sequence: _,
                 records,
-            } => Ok(records
-                .into_iter()
-                .enumerate()
-                .map(|(i, r)| NumberedRecord::new(i as u64 + head, r))
-                .collect()),
-            _ => Err(anyhow!("Expected Records message")),
+            } => Ok(Some(
+                records
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, r)| NumberedRecord::new(i as u64 + head, r.clone()))
+                    .collect(),
+            )),
+            _ => Ok(None),
         }
     }
 

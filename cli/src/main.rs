@@ -7,7 +7,7 @@ use tracing::*;
 use tracing_subscriber::prelude::*;
 
 use discovery::{DeviceId, Discovered, Discovery};
-use sync::{Server, ServerEvent, UdpTransport};
+use sync::{DevNullSink, Server, ServerEvent, UdpTransport};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Sync(command)) => {
             let (transfer_publish, mut transfer_events) = mpsc::channel::<ServerEvent>(32);
-            let server = Arc::new(Server::new(UdpTransport::new()));
+            let server = Arc::new(Server::new(UdpTransport::new(), DevNullSink::default()));
             let discovery = Discovery::default();
             let (tx, mut rx) = mpsc::channel::<Discovered>(32);
 
