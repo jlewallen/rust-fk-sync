@@ -6,14 +6,14 @@ use range_set_blaze::prelude::*;
 use std::{
     collections::HashMap,
     net::{SocketAddr, SocketAddrV4},
-    ops::RangeInclusive,
+    ops::{RangeInclusive, Sub},
     sync::Arc,
     time::{Duration, SystemTime},
 };
 use tokio::{
     net::UdpSocket,
     sync::mpsc::Sender,
-    sync::mpsc::{self, Receiver},
+    sync::mpsc::{self},
     sync::Mutex,
     time::{self, Instant},
 };
@@ -39,11 +39,22 @@ pub enum ServerEvent {
 }
 
 #[derive(Debug)]
-enum ServerCommand {
+pub enum ServerCommand {
     Begin(Discovered),
     Cancel(DeviceId),
     Received(TransportMessage),
     Tick,
+}
+
+impl ServerCommand {
+    fn name(&self) -> &str {
+        match self {
+            ServerCommand::Begin(_) => "begin",
+            ServerCommand::Cancel(_) => "cancel",
+            ServerCommand::Received(_) => "received",
+            ServerCommand::Tick => "tick",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +84,7 @@ struct ConnectedDevice {
     backoff: ExponentialBackoff,
     waiting_until: Option<Instant>,
     syncing_started: Option<SystemTime>,
+    progress_published: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -97,6 +109,7 @@ impl ConnectedDevice {
             backoff: Self::stall_backoff(),
             waiting_until: None,
             syncing_started: None,
+            progress_published: None,
         }
     }
 
@@ -328,7 +341,12 @@ impl ConnectedDevice {
     }
 
     async fn transition(&mut self, new: DeviceState, publish: &Sender<ServerEvent>) -> Result<()> {
-        info!("{:?} -> {:?}", &self.state, &new);
+        info!(
+            "{:?} -> {:?} (publish:capacity = {})",
+            &self.state,
+            &new,
+            publish.capacity()
+        );
 
         match (&self.state, &new) {
             (DeviceState::Synced, _) => {}
@@ -360,7 +378,7 @@ impl ConnectedDevice {
         &mut self,
         transition: Transition,
         publish: &Sender<ServerEvent>,
-        sender: &MessageSender,
+        sender: &Sender<TransportMessage>,
     ) -> Result<()> {
         match transition {
             Transition::None => Ok(()),
@@ -424,12 +442,9 @@ impl RecordsSink for DevNullSink {
 #[derive(Debug)]
 pub struct TransportMessage((SocketAddr, Message));
 
-pub type MessageReceiver = Receiver<TransportMessage>;
-pub type MessageSender = Sender<TransportMessage>;
-
 #[async_trait]
 pub trait Transport {
-    async fn open(&self) -> Result<(MessageSender, MessageReceiver)>;
+    async fn open(&self, received: Sender<ServerCommand>) -> Result<Sender<TransportMessage>>;
 }
 
 pub struct UdpTransport {
@@ -444,7 +459,7 @@ impl UdpTransport {
 
 #[async_trait]
 impl Transport for UdpTransport {
-    async fn open(&self) -> Result<(MessageSender, MessageReceiver)> {
+    async fn open(&self, received: Sender<ServerCommand>) -> Result<Sender<TransportMessage>> {
         let listening_addr = SocketAddrV4::new(IP_ALL.into(), self.port);
         let receiving = Arc::new(bind(&listening_addr)?);
         let sending = receiving.clone();
@@ -453,7 +468,6 @@ impl Transport for UdpTransport {
 
         // This were chosen arbitrarily.
         let (send_tx, mut send_rx) = mpsc::channel::<TransportMessage>(256);
-        let (recv_tx, recv_rx) = mpsc::channel::<TransportMessage>(256);
 
         // No amount of investigation into graceful exiting has been done.
         tokio::spawn(async move {
@@ -468,7 +482,19 @@ impl Transport for UdpTransport {
 
                             match codec.try_read(&buffer[..len]) {
                                 Ok(Some(message)) => {
-                                    match recv_tx.send(TransportMessage((addr, message))).await {
+                                    if received.capacity() < received.max_capacity() / 8 {
+                                        warn!(
+                                            "udp:receive:capacity = {}/{}",
+                                            received.capacity(),
+                                            received.max_capacity()
+                                        );
+                                    }
+                                    match received
+                                        .send(ServerCommand::Received(TransportMessage((
+                                            addr, message,
+                                        ))))
+                                        .await
+                                    {
                                         Err(e) => warn!("Publish received error: {}", e),
                                         _ => {}
                                     }
@@ -491,7 +517,7 @@ impl Transport for UdpTransport {
                 let mut buffer = Vec::new();
                 match message.write(&mut buffer) {
                     Ok(_) => {
-                        trace!("{:?} Sending {:?}", addr, buffer.len());
+                        info!("{:?} Sending {:?}", addr, buffer.len());
 
                         match sending.send_to(&buffer, addr).await {
                             Ok(_) => {}
@@ -503,7 +529,7 @@ impl Transport for UdpTransport {
             }
         });
 
-        Ok((send_tx, recv_rx))
+        Ok(send_tx)
     }
 }
 
@@ -541,18 +567,25 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
     }
 
     pub async fn run(&self, publish: Sender<ServerEvent>) -> Result<()> {
-        let (sending, mut receiving) = self.transport.open().await?;
-
         let (tx, mut rx) = mpsc::channel::<ServerCommand>(1024);
+
+        let sending = self.transport.open(tx.clone()).await?;
 
         let records_sink = Arc::clone(&self.records_sink);
 
         let pump = tokio::spawn({
+            let tx = tx.clone();
             let mut devices = Devices::new();
             let mut locked = self.sender.lock().await;
             *locked = Some(tx.clone());
             async move {
                 while let Some(cmd) = rx.recv().await {
+                    info!(
+                        "server-command:capacity = {}/{} ({})",
+                        tx.capacity(),
+                        tx.max_capacity(),
+                        cmd.name(),
+                    );
                     match handle_server_command::<R>(
                         &cmd,
                         &sending,
@@ -564,19 +597,6 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
                     {
                         Ok(_) => {}
                         Err(e) => warn!("Server command error: {}", e),
-                    }
-                }
-            }
-        });
-
-        let receive = tokio::spawn({
-            let tx = tx.clone();
-
-            async move {
-                loop {
-                    match receive_and_send(&mut receiving, &tx).await {
-                        Err(e) => warn!("Receive and process error: {}", e),
-                        Ok(_) => {}
                     }
                 }
             }
@@ -597,7 +617,6 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
 
         tokio::select! {
             _ = pump => Ok(()),
-            _ = receive => Ok(()),
             _ = timer => Ok(())
         }
     }
@@ -688,7 +707,7 @@ impl Devices {
 
 async fn handle_server_command<R: RecordsSink>(
     cmd: &ServerCommand,
-    sending: &MessageSender,
+    sending: &Sender<TransportMessage>,
     publish: &Sender<ServerEvent>,
     devices: &mut Devices,
     records_sink: &Arc<Mutex<R>>,
@@ -724,14 +743,22 @@ async fn handle_server_command<R: RecordsSink>(
                     }
 
                     if let Some(progress) = connected.progress() {
-                        let started = connected.syncing_started.unwrap_or(SystemTime::now());
-                        publish
-                            .send(ServerEvent::Progress(
-                                connected.device_id.clone(),
-                                started,
-                                progress,
-                            ))
-                            .await?;
+                        let publish_progress = match connected.progress_published {
+                            Some(last) => Instant::now().sub(last) > Duration::from_secs(1),
+                            None => true,
+                        };
+                        if publish_progress {
+                            let started = connected.syncing_started.unwrap_or(SystemTime::now());
+                            publish
+                                .send(ServerEvent::Progress(
+                                    connected.device_id.clone(),
+                                    started,
+                                    progress,
+                                ))
+                                .await?;
+
+                            connected.progress_published = Some(Instant::now());
+                        }
                     }
                 }
                 None => todo!(),
@@ -759,20 +786,8 @@ async fn handle_server_command<R: RecordsSink>(
     Ok(())
 }
 
-async fn receive_and_send(
-    receiving: &mut MessageReceiver,
-    tx: &Sender<ServerCommand>,
-) -> Result<()> {
-    let received = receiving
-        .recv()
-        .await
-        .ok_or_else(|| anyhow!("Expected message"))?;
-
-    Ok(tx.send(ServerCommand::Received(received)).await?)
-}
-
-async fn transmit(tx: &MessageSender, addr: &SocketAddr, m: Message) -> Result<()> {
-    info!("{:?} to {:?}", m, addr);
+async fn transmit(tx: &Sender<TransportMessage>, addr: &SocketAddr, m: Message) -> Result<()> {
+    info!("{:?} to {:?} (capacity = {})", m, addr, tx.capacity());
 
     Ok(tx.send(TransportMessage((addr.clone(), m))).await?)
 }
@@ -781,14 +796,14 @@ async fn transmit(tx: &MessageSender, addr: &SocketAddr, m: Message) -> Result<(
 mod tests {
     use std::cell::Cell;
 
-    use tokio::sync::Mutex;
+    use tokio::sync::{mpsc::Receiver, Mutex};
 
     use super::*;
 
     #[allow(dead_code)]
     pub struct TokioTransport {
-        first: Mutex<Cell<Option<(MessageSender, MessageReceiver)>>>,
-        second: Mutex<Cell<Option<(MessageSender, MessageReceiver)>>>,
+        first: Mutex<Cell<Option<(Sender<TransportMessage>, Receiver<TransportMessage>)>>>,
+        second: Mutex<Cell<Option<(Sender<TransportMessage>, Receiver<TransportMessage>)>>>,
     }
 
     impl TokioTransport {}
@@ -807,9 +822,9 @@ mod tests {
 
     #[async_trait]
     impl Transport for TokioTransport {
-        async fn open(&self) -> Result<(MessageSender, MessageReceiver)> {
+        async fn open(&self, _received: Sender<ServerCommand>) -> Result<Sender<TransportMessage>> {
             let second = self.second.lock().await;
-            Ok(second.take().unwrap())
+            Ok(second.take().unwrap().0)
         }
     }
 
