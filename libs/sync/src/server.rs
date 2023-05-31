@@ -619,9 +619,9 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
                             batch.len(),
                         );
                     }
-                    for cmd in batch.into_iter() {
+                    for cmd in batch.iter() {
                         match handle_server_command::<R>(
-                            &cmd,
+                            cmd,
                             &sending,
                             &publish,
                             &mut devices,
@@ -778,22 +778,14 @@ async fn handle_server_command<R: RecordsSink>(
                     }
 
                     if let Some(progress) = connected.progress() {
-                        let publish_progress = match connected.progress_published {
-                            Some(last) => Instant::now().sub(last) > Duration::from_secs(1),
-                            None => true,
-                        };
-                        if publish_progress {
-                            let started = connected.syncing_started.unwrap_or(SystemTime::now());
-                            publish
-                                .send(ServerEvent::Progress(
-                                    connected.device_id.clone(),
-                                    started,
-                                    progress,
-                                ))
-                                .await?;
-
-                            connected.progress_published = Some(Instant::now());
-                        }
+                        publish
+                            .send(ServerEvent::Progress(
+                                connected.device_id.clone(),
+                                connected.syncing_started.unwrap_or(SystemTime::now()),
+                                progress,
+                            ))
+                            .await?;
+                        connected.progress_published = Some(Instant::now());
                     }
                 }
                 None => todo!(),
