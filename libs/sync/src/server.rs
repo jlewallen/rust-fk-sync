@@ -444,7 +444,7 @@ pub struct TransportMessage((SocketAddr, Message));
 
 #[async_trait]
 pub trait Transport {
-    async fn open(&self, received: Sender<ServerCommand>) -> Result<Sender<TransportMessage>>;
+    async fn open(&self, received: Sender<Vec<ServerCommand>>) -> Result<Sender<TransportMessage>>;
 }
 
 pub struct UdpTransport {
@@ -459,7 +459,7 @@ impl UdpTransport {
 
 #[async_trait]
 impl Transport for UdpTransport {
-    async fn open(&self, received: Sender<ServerCommand>) -> Result<Sender<TransportMessage>> {
+    async fn open(&self, received: Sender<Vec<ServerCommand>>) -> Result<Sender<TransportMessage>> {
         let listening_addr = SocketAddrV4::new(IP_ALL.into(), self.port);
         let receiving = Arc::new(bind(&listening_addr)?);
         let sending = receiving.clone();
@@ -467,16 +467,20 @@ impl Transport for UdpTransport {
         info!("listening on {}", listening_addr);
 
         // This were chosen arbitrarily.
-        let (send_tx, mut send_rx) = mpsc::channel::<TransportMessage>(256);
+        let (send_tx, mut send_rx) = mpsc::channel::<TransportMessage>(32);
 
         // No amount of investigation into graceful exiting has been done.
         tokio::spawn(async move {
             loop {
                 let mut codec = MessageCodec::default();
+                let mut batch: Vec<ServerCommand> = Vec::new();
+
+                receiving.readable().await.expect("Oops");
+
                 loop {
                     let mut buffer = vec![0u8; 4096];
 
-                    match receiving.recv_from(&mut buffer[..]).await {
+                    match receiving.try_recv_from(&mut buffer[..]) {
                         Ok((len, addr)) => {
                             trace!("{:?} Received {:?}", addr, len);
 
@@ -489,21 +493,22 @@ impl Transport for UdpTransport {
                                             received.max_capacity()
                                         );
                                     }
-                                    match received
-                                        .send(ServerCommand::Received(TransportMessage((
-                                            addr, message,
-                                        ))))
-                                        .await
-                                    {
-                                        Err(e) => warn!("Publish received error: {}", e),
-                                        _ => {}
-                                    }
 
-                                    break;
+                                    batch.push(ServerCommand::Received(TransportMessage((
+                                        addr, message,
+                                    ))));
                                 }
                                 Ok(None) => {}
                                 Err(e) => warn!("Codec error: {}", e),
                             }
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            match received.send(batch).await {
+                                Err(e) => warn!("Publish received error: {}", e),
+                                _ => {}
+                            }
+
+                            break;
                         }
                         Err(e) => warn!("Receive error: {}", e),
                     }
@@ -540,7 +545,7 @@ where
 {
     transport: T,
     records_sink: Arc<Mutex<R>>,
-    sender: Arc<Mutex<Option<Sender<ServerCommand>>>>,
+    sender: Arc<Mutex<Option<Sender<Vec<ServerCommand>>>>>,
 }
 
 impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
@@ -567,7 +572,7 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
     }
 
     pub async fn run(&self, publish: Sender<ServerEvent>) -> Result<()> {
-        let (tx, mut rx) = mpsc::channel::<ServerCommand>(1024);
+        let (tx, mut rx) = mpsc::channel::<Vec<ServerCommand>>(1024);
 
         let sending = self.transport.open(tx.clone()).await?;
 
@@ -579,24 +584,28 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
             let mut locked = self.sender.lock().await;
             *locked = Some(tx.clone());
             async move {
-                while let Some(cmd) = rx.recv().await {
-                    info!(
-                        "server-command:capacity = {}/{} ({})",
-                        tx.capacity(),
-                        tx.max_capacity(),
-                        cmd.name(),
-                    );
-                    match handle_server_command::<R>(
-                        &cmd,
-                        &sending,
-                        &publish,
-                        &mut devices,
-                        &records_sink,
-                    )
-                    .await
-                    {
-                        Ok(_) => {}
-                        Err(e) => warn!("Server command error: {}", e),
+                while let Some(batch) = rx.recv().await {
+                    if tx.capacity() < tx.max_capacity() / 8 {
+                        info!(
+                            "server-command:capacity = {}/{} ({})",
+                            tx.capacity(),
+                            tx.max_capacity(),
+                            batch.len(),
+                        );
+                    }
+                    for cmd in batch.into_iter() {
+                        match handle_server_command::<R>(
+                            &cmd,
+                            &sending,
+                            &publish,
+                            &mut devices,
+                            &records_sink,
+                        )
+                        .await
+                        {
+                            Ok(_) => {}
+                            Err(e) => warn!("Server command error: {}", e),
+                        }
                     }
                 }
             }
@@ -608,7 +617,7 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
             loop {
                 interval.tick().await;
 
-                match tx.send(ServerCommand::Tick).await {
+                match tx.send(vec![ServerCommand::Tick]).await {
                     Err(e) => warn!("Tick error: {}", e),
                     Ok(_) => {}
                 }
@@ -626,7 +635,7 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
         Ok(locked
             .as_ref()
             .ok_or_else(|| anyhow!("Sender required"))?
-            .send(cmd)
+            .send(vec![cmd])
             .await?)
     }
 }
@@ -822,7 +831,10 @@ mod tests {
 
     #[async_trait]
     impl Transport for TokioTransport {
-        async fn open(&self, _received: Sender<ServerCommand>) -> Result<Sender<TransportMessage>> {
+        async fn open(
+            &self,
+            _received: Sender<Vec<ServerCommand>>,
+        ) -> Result<Sender<TransportMessage>> {
             let second = self.second.lock().await;
             Ok(second.take().unwrap().0)
         }
