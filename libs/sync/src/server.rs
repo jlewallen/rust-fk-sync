@@ -496,6 +496,14 @@ impl Transport for UdpTransport {
 
                             match codec.try_read(&buffer[..len]) {
                                 Ok(Some(message)) => {
+                                    if let Message::Batch { flags: _flags } = message {
+                                        info!(
+                                            "{:?} Batch recv-queue = {}",
+                                            addr,
+                                            received.max_capacity() - received.capacity()
+                                        )
+                                    }
+
                                     if received.capacity() < received.max_capacity() / 8 {
                                         warn!(
                                             "udp:receive:capacity = {}/{}",
@@ -532,7 +540,7 @@ impl Transport for UdpTransport {
                 let mut buffer = Vec::new();
                 match message.write(&mut buffer) {
                     Ok(_) => {
-                        info!("{:?} Sending {:?}", addr, buffer.len());
+                        debug!("{:?} Sending {:?}", addr, buffer.len());
 
                         match sending.send_to(&buffer, addr).await {
                             Ok(_) => {}
