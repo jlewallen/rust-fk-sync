@@ -47,7 +47,7 @@ pub enum ServerCommand {
 }
 
 impl ServerCommand {
-    fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         match self {
             ServerCommand::Begin(_) => "begin",
             ServerCommand::Cancel(_) => "cancel",
@@ -73,6 +73,11 @@ enum HasGaps {
     HasGaps(RangeInclusive<u64>, Vec<RangeInclusive<u64>>),
 }
 
+#[derive(Default)]
+pub struct Statistics {
+    pub messages_received: u32,
+}
+
 struct ConnectedDevice {
     device_id: DeviceId,
     addr: SocketAddr,
@@ -85,6 +90,7 @@ struct ConnectedDevice {
     waiting_until: Option<Instant>,
     syncing_started: Option<SystemTime>,
     progress_published: Option<Instant>,
+    statistics: Statistics,
 }
 
 #[derive(Debug)]
@@ -101,7 +107,7 @@ impl ConnectedDevice {
         Self {
             device_id,
             addr,
-            batch_size: 10000,
+            batch_size: 5000,
             state: DeviceState::Discovered,
             received_at: Instant::now(),
             total_records: None,
@@ -110,6 +116,7 @@ impl ConnectedDevice {
             waiting_until: None,
             syncing_started: None,
             progress_published: None,
+            statistics: Default::default(),
         }
     }
 
@@ -164,6 +171,7 @@ impl ConnectedDevice {
         self.received_at = Instant::now();
         self.backoff.reset();
         self.waiting_until = None;
+        self.statistics.messages_received += 1;
 
         match message {
             Message::Statistics { nrecords } => {
