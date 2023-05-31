@@ -38,7 +38,7 @@ impl From<&RangeInclusive<u64>> for RecordRange {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NumberedRecord {
     pub number: u64,
     pub record: Record,

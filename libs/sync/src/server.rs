@@ -415,6 +415,7 @@ impl ConnectedDevice {
     }
 }
 
+#[derive(Debug)]
 pub struct ReceivedRecords {
     pub device_id: DeviceId,
     pub records: Vec<NumberedRecord>,
@@ -606,7 +607,20 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
 
         let sending = self.transport.open(tx.clone()).await?;
 
+        let (sink_tx, mut sink_rx) = mpsc::channel::<ReceivedRecords>(1024);
         let records_sink = Arc::clone(&self.records_sink);
+
+        let drain_sink = tokio::spawn({
+            async move {
+                while let Some(received) = sink_rx.recv().await {
+                    let sink = records_sink.lock().await;
+                    match sink.write(&received) {
+                        Err(e) => warn!("Write records error: {:?}", e),
+                        Ok(_) => (),
+                    }
+                }
+            }
+        });
 
         let pump = tokio::spawn({
             let tx = tx.clone();
@@ -628,8 +642,8 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
                             cmd,
                             &sending,
                             &publish,
+                            &sink_tx,
                             &mut devices,
-                            &records_sink,
                         )
                         .await
                         {
@@ -655,6 +669,7 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
         });
 
         tokio::select! {
+            _ = drain_sink => Ok(()),
             _ = pump => Ok(()),
             _ = timer => Ok(())
         }
@@ -748,8 +763,8 @@ async fn handle_server_command<R: RecordsSink>(
     cmd: &ServerCommand,
     sending: &Sender<TransportMessage>,
     publish: &Sender<ServerEvent>,
+    sink: &Sender<ReceivedRecords>,
     devices: &mut Devices,
-    records_sink: &Arc<Mutex<R>>,
 ) -> Result<()> {
     match cmd {
         ServerCommand::Begin(discovered) => {
@@ -774,11 +789,11 @@ async fn handle_server_command<R: RecordsSink>(
                     connected.apply(transition, publish, sending).await?;
 
                     if let Some(records) = message.numbered_records()? {
-                        let sink = records_sink.lock().await;
-                        sink.write(&ReceivedRecords {
+                        sink.send(ReceivedRecords {
                             device_id: connected.device_id.clone(),
                             records,
-                        })?;
+                        })
+                        .await?;
                     }
 
                     if let Some(progress) = connected.progress() {
