@@ -471,11 +471,21 @@ impl Transport for UdpTransport {
 
         // No amount of investigation into graceful exiting has been done.
         tokio::spawn(async move {
+            let mut last_packet = None;
+
             loop {
                 let mut codec = MessageCodec::default();
                 let mut batch: Vec<ServerCommand> = Vec::new();
 
                 receiving.readable().await.expect("Oops");
+
+                if let Some(last_packet) = last_packet {
+                    let elapsed = Instant::now().sub(last_packet);
+                    if elapsed > Duration::from_millis(500) {
+                        info!("last packet {:?}", elapsed);
+                    }
+                }
+                last_packet = Some(Instant::now());
 
                 loop {
                     let mut buffer = vec![0u8; 4096];
