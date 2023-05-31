@@ -103,11 +103,11 @@ enum Transition {
 }
 
 impl ConnectedDevice {
-    fn new(device_id: DeviceId, addr: SocketAddr) -> Self {
+    fn new_with_batch_size(device_id: DeviceId, addr: SocketAddr, batch_size: u64) -> Self {
         Self {
             device_id,
             addr,
-            batch_size: 5000,
+            batch_size,
             state: DeviceState::Discovered,
             received_at: Instant::now(),
             total_records: None,
@@ -118,6 +118,10 @@ impl ConnectedDevice {
             progress_published: None,
             statistics: Default::default(),
         }
+    }
+
+    fn new(device_id: DeviceId, addr: SocketAddr) -> Self {
+        Self::new_with_batch_size(device_id, addr, 5000)
     }
 
     fn stall_backoff() -> ExponentialBackoff {
@@ -859,9 +863,10 @@ mod tests {
     }
 
     fn test_device() -> ConnectedDevice {
-        ConnectedDevice::new(
+        ConnectedDevice::new_with_batch_size(
             DeviceId("test-device".to_owned()),
             SocketAddrV4::new(IP_ALL.into(), 22144).into(),
+            10000,
         )
     }
 
