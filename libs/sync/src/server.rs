@@ -89,7 +89,7 @@ struct ConnectedDevice {
     addr: SocketAddr,
     batch_size: u64,
     state: DeviceState,
-    received_at: Instant,
+    received_at: Option<Instant>,
     total_records: Option<u64>,
     received: RangeSetBlaze<u64>,
     backoff: ExponentialBackoff,
@@ -121,7 +121,7 @@ impl ConnectedDevice {
             addr,
             batch_size,
             state: DeviceState::Discovered,
-            received_at: Instant::now(),
+            received_at: None,
             total_records: None,
             received: RangeSetBlaze::new(),
             backoff: Self::stall_backoff(),
@@ -137,13 +137,22 @@ impl ConnectedDevice {
         Self::new_with_batch_size(device_id, addr, 5000)
     }
 
-    fn stall_backoff() -> ExponentialBackoff {
-        ExponentialBackoffBuilder::new()
-            .with_initial_interval(Duration::from_millis(5000))
-            .with_randomization_factor(0.0)
-            .with_multiplier(1.8)
-            .with_max_elapsed_time(Some(Duration::from_secs(30)))
-            .build()
+    fn try_begin(&mut self) -> Transition {
+        match &self.state {
+            DeviceState::Discovered | DeviceState::Synced => {
+                self.total_records = None;
+                self.received = Default::default();
+                self.received_at = None;
+                self.sync_id = new_sync_id();
+                self.syncing_started = None;
+                self.progress_published = None;
+                self.statistics = Default::default();
+                self.backoff.reset();
+
+                Transition::Send(Message::Query, DeviceState::Learning)
+            }
+            _ => Transition::None,
+        }
     }
 
     fn tick(&mut self) -> Result<Transition> {
@@ -185,10 +194,10 @@ impl ConnectedDevice {
     }
 
     fn handle(&mut self, message: &Message) -> Result<Transition> {
-        self.received_at = Instant::now();
-        self.backoff.reset();
-        self.waiting_until = None;
         self.statistics.messages_received += 1;
+        self.received_at = Some(Instant::now());
+        self.waiting_until = None;
+        self.backoff.reset();
 
         match message {
             Message::Statistics { nrecords } => {
@@ -289,14 +298,18 @@ impl ConnectedDevice {
         self.received.append(&mut appending);
     }
 
-    fn last_received_at(&self) -> Duration {
-        Instant::now() - self.received_at
+    fn last_received_at(&self) -> Option<Duration> {
+        self.received_at.map(|r| Instant::now() - r)
+    }
+
+    fn last_received_more_than(&self, d: Duration) -> bool {
+        self.last_received_at().map(|v| v > d).unwrap_or(false)
     }
 
     fn is_expired(&self) -> bool {
         match &self.state {
             DeviceState::Receiving(_) => {
-                self.last_received_at() > Duration::from_millis(EXPIRED_MILLIS)
+                self.last_received_more_than(Duration::from_millis(EXPIRED_MILLIS))
             }
             _ => false,
         }
@@ -311,10 +324,10 @@ impl ConnectedDevice {
 
         match &self.state {
             DeviceState::Learning | DeviceState::Required(_) => {
-                self.last_received_at() > Duration::from_millis(STALLED_EXPECTING_MILLIS)
+                self.last_received_more_than(Duration::from_millis(STALLED_EXPECTING_MILLIS))
             }
             DeviceState::Receiving(_) => {
-                self.last_received_at() > Duration::from_millis(STALLED_RECEIVING_MILLIS)
+                self.last_received_more_than(Duration::from_millis(STALLED_RECEIVING_MILLIS))
             }
             _ => false,
         }
@@ -336,6 +349,15 @@ impl ConnectedDevice {
             }
             None => HasGaps::Continuous(0..=0),
         }
+    }
+
+    fn stall_backoff() -> ExponentialBackoff {
+        ExponentialBackoffBuilder::new()
+            .with_initial_interval(Duration::from_millis(5000))
+            .with_randomization_factor(0.0)
+            .with_multiplier(1.8)
+            .with_max_elapsed_time(Some(Duration::from_secs(30)))
+            .build()
     }
 
     fn completed(&self) -> Option<RangeProgress> {
@@ -649,10 +671,10 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
 
             match devices.get_or_add_device(discovered.device_id.clone(), udp_addr) {
                 Some(connected) => {
-                    let transition = connected.tick()?;
+                    let transition = connected.try_begin();
                     connected.apply(transition, events, sink, sending).await?
                 }
-                None => {}
+                None => warn!("No connected device on Begin"),
             }
         }
         ServerCommand::Received(TransportMessage((addr, message))) => {
