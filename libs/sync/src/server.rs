@@ -491,7 +491,6 @@ impl SendTransport for OpenUdp {
         message.write(&mut buffer)?;
 
         debug!("{:?} Sending {:?}", addr, buffer.len());
-
         self.socket.send_to(&buffer, addr).await?;
 
         Ok(())
@@ -504,17 +503,7 @@ impl ReceiveTransport for OpenUdp {
         let mut codec = MessageCodec::default();
         let mut batch: Vec<TransportMessage> = Vec::new();
 
-        self.socket.readable().await.expect("Oops");
-
-        /*
-        if let Some(last_packet) = last_packet {
-            let elapsed = Instant::now().sub(last_packet);
-            if elapsed > Duration::from_millis(500) {
-                info!("last packet {:?}", elapsed);
-            }
-        }
-        last_packet = Some(Instant::now());
-        */
+        self.socket.readable().await?;
 
         loop {
             let mut buffer = vec![0u8; 4096];
@@ -523,22 +512,21 @@ impl ReceiveTransport for OpenUdp {
                 Ok((len, addr)) => {
                     trace!("{:?} Received {:?}", addr, len);
 
-                    match codec.try_read(&buffer[..len]) {
-                        Ok(Some(message)) => {
+                    match codec.try_read(&buffer[..len])? {
+                        Some(message) => {
                             if let Message::Batch { flags: _flags } = message {
                                 info!("{:?} Batch", addr,)
                             }
 
                             batch.push(TransportMessage((addr, message)));
                         }
-                        Ok(None) => {}
-                        Err(e) => warn!("Codec error: {}", e),
+                        None => {}
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     return Ok(Some(batch));
                 }
-                Err(e) => warn!("Receive error: {}", e),
+                Err(e) => return Err(e.into()),
             }
         }
     }
@@ -734,6 +722,7 @@ impl Devices {
             by_addr: HashMap::new(),
         }
     }
+
     fn get_or_add_device(
         &mut self,
         device_id: DeviceId,
