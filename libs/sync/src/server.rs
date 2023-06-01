@@ -353,29 +353,36 @@ impl ConnectedDevice {
         }
     }
 
-    async fn transition(&mut self, new: DeviceState, publish: &Sender<ServerEvent>) -> Result<()> {
+    async fn transition(
+        &mut self,
+        new: DeviceState,
+        events: &Sender<ServerEvent>,
+        sink: &Sender<SinkMessage>,
+    ) -> Result<()> {
         info!(
-            "{:?} -> {:?} (publish:capacity = {})",
+            "{:?} -> {:?} (publish:capacity = {}) (sink:capacity = {})",
             &self.state,
             &new,
-            publish.capacity()
+            events.max_capacity() - events.capacity(),
+            sink.max_capacity() - sink.capacity()
         );
 
         match (&self.state, &new) {
             (DeviceState::Synced, _) => {}
             (DeviceState::Failed, _) => {}
             (_, DeviceState::Learning) => {
-                publish
+                events
                     .send(ServerEvent::Began(self.device_id.clone()))
                     .await?;
             }
             (_, DeviceState::Synced) => {
-                publish
+                events
                     .send(ServerEvent::Completed(self.device_id.clone()))
                     .await?;
+                sink.send(SinkMessage::Flush).await?;
             }
             (_, DeviceState::Failed) => {
-                publish
+                events
                     .send(ServerEvent::Failed(self.device_id.clone()))
                     .await?;
             }
@@ -390,13 +397,14 @@ impl ConnectedDevice {
     async fn apply<S: SendTransport>(
         &mut self,
         transition: Transition,
-        publish: &Sender<ServerEvent>,
+        events: &Sender<ServerEvent>,
+        sink: &Sender<SinkMessage>,
         sender: &S,
     ) -> Result<()> {
         match transition {
             Transition::None => Ok(()),
             Transition::Direct(state) => {
-                self.transition(state, publish).await?;
+                self.transition(state, events, sink).await?;
 
                 Ok(())
             }
@@ -412,7 +420,7 @@ impl ConnectedDevice {
                     .send(TransportMessage((self.addr.clone(), sending)))
                     .await?;
 
-                self.transition(state, publish).await?;
+                self.transition(state, events, sink).await?;
 
                 Ok(())
             }
@@ -442,6 +450,12 @@ impl ReceivedRecords {
     pub fn iter(&self) -> impl Iterator<Item = &NumberedRecord> {
         self.records.iter()
     }
+}
+
+#[derive(Debug)]
+pub enum SinkMessage {
+    Records(ReceivedRecords),
+    Flush,
 }
 
 pub trait RecordsSink: Send + Sync {
@@ -596,19 +610,20 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
 
     pub async fn run(&self, publish: Sender<ServerEvent>) -> Result<()> {
         let (tx, mut rx) = mpsc::channel::<Vec<ServerCommand>>(1024);
-
+        let (sink_tx, mut sink_rx) = mpsc::channel::<SinkMessage>(1024);
         let (send, receive) = self.transport.open().await?;
 
-        let (sink_tx, mut sink_rx) = mpsc::channel::<ReceivedRecords>(1024);
-        let records_sink = Arc::clone(&self.records_sink);
-
         let drain_sink = tokio::spawn({
+            let records_sink = Arc::clone(&self.records_sink);
             async move {
-                while let Some(received) = sink_rx.recv().await {
+                while let Some(message) = sink_rx.recv().await {
                     let sink = records_sink.lock().await;
-                    match sink.write(&received) {
-                        Err(e) => warn!("Write records error: {:?}", e),
-                        Ok(_) => (),
+                    match message {
+                        SinkMessage::Records(received) => match sink.write(&received) {
+                            Err(e) => warn!("Write records error: {:?}", e),
+                            Ok(_) => (),
+                        },
+                        SinkMessage::Flush => warn!("FLUSH"),
                     }
                 }
             }
@@ -776,8 +791,8 @@ impl Devices {
 async fn handle_server_command<R: RecordsSink, S: SendTransport>(
     cmd: &ServerCommand,
     sending: &S,
-    publish: &Sender<ServerEvent>,
-    sink: &Sender<ReceivedRecords>,
+    events: &Sender<ServerEvent>,
+    sink: &Sender<SinkMessage>,
     devices: &mut Devices,
 ) -> Result<()> {
     match cmd {
@@ -789,7 +804,7 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
             match devices.get_or_add_device(discovered.device_id.clone(), udp_addr) {
                 Some(connected) => {
                     let transition = connected.tick()?;
-                    connected.apply(transition, publish, sending).await?
+                    connected.apply(transition, events, sink, sending).await?
                 }
                 None => {}
             }
@@ -800,18 +815,18 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
             match devices.get_device_by_addr(addr) {
                 Some(connected) => {
                     let transition = connected.handle(message)?;
-                    connected.apply(transition, publish, sending).await?;
+                    connected.apply(transition, events, sink, sending).await?;
 
                     if let Some(records) = message.numbered_records()? {
-                        sink.send(ReceivedRecords {
+                        sink.send(SinkMessage::Records(ReceivedRecords {
                             device_id: connected.device_id.clone(),
                             records,
-                        })
+                        }))
                         .await?;
                     }
 
                     if let Some(progress) = connected.progress() {
-                        publish
+                        events
                             .send(ServerEvent::Progress(
                                 connected.device_id.clone(),
                                 connected.syncing_started.unwrap_or(SystemTime::now()),
@@ -829,7 +844,7 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
 
             for connected in devices.iter() {
                 let transition = connected.tick()?;
-                connected.apply(transition, publish, sending).await?;
+                connected.apply(transition, events, sink, sending).await?;
             }
         }
         ServerCommand::Cancel(device_id) => {
@@ -837,7 +852,7 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
                 info!("{:?} removed", device_id);
                 match connected.state {
                     DeviceState::Synced => {}
-                    _ => publish.send(ServerEvent::Failed(device_id.clone())).await?,
+                    _ => events.send(ServerEvent::Failed(device_id.clone())).await?,
                 }
             }
         }
