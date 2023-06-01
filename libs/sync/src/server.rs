@@ -50,7 +50,8 @@ impl RecordsSink for DevNullSink {
 #[derive(Debug)]
 pub enum ServerEvent {
     Began(DeviceId),
-    Progress(DeviceId, SystemTime, Progress),
+    Transferring(DeviceId, SystemTime, Progress),
+    Processing(DeviceId),
     Completed(DeviceId),
     Failed(DeviceId),
 }
@@ -61,6 +62,7 @@ pub enum ServerCommand {
     Cancel(DeviceId),
     Received(TransportMessage),
     Tick,
+    Flushed,
 }
 
 #[derive(Clone)]
@@ -85,6 +87,7 @@ enum DeviceState {
     Required(RecordRange),
     Receiving(RecordRange),
     Stalled(Until),
+    Processing,
     Synced,
     Failed,
 }
@@ -202,6 +205,16 @@ impl ConnectedDevice {
         }
     }
 
+    fn flushed(&self) -> Transition {
+        match &self.state {
+            DeviceState::Processing => Transition::Direct(DeviceState::Synced),
+            _ => {
+                warn!("Flushed during {:?}", self.state);
+                Transition::None
+            }
+        }
+    }
+
     fn handle(&mut self, message: &Message) -> Result<Transition> {
         self.statistics.messages_received += 1;
         self.received_at = Some(Instant::now());
@@ -250,9 +263,9 @@ impl ConnectedDevice {
         } else {
             if self.total_records.is_some() {
                 let elapsed = SystemTime::now().duration_since(self.syncing_started.unwrap())?;
-                info!("Syncing took {:?}", elapsed);
+                info!("Transferring took {:?}", elapsed);
 
-                Ok(Transition::Direct(DeviceState::Synced))
+                Ok(Transition::Direct(DeviceState::Processing))
             } else {
                 Ok(Transition::None)
             }
@@ -406,11 +419,16 @@ impl ConnectedDevice {
                     .send(ServerEvent::Began(self.device_id.clone()))
                     .await?;
             }
+            (_, DeviceState::Processing) => {
+                events
+                    .send(ServerEvent::Processing(self.device_id.clone()))
+                    .await?;
+                sink.send(SinkMessage::Flush).await?;
+            }
             (_, DeviceState::Synced) => {
                 events
                     .send(ServerEvent::Completed(self.device_id.clone()))
                     .await?;
-                sink.send(SinkMessage::Flush).await?;
             }
             (_, DeviceState::Failed) => {
                 events
@@ -491,6 +509,7 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
         let (send, receive) = self.transport.open().await?;
 
         let drain_sink = tokio::spawn({
+            let tx = tx.clone();
             let records_sink = Arc::clone(&self.records_sink);
             async move {
                 while let Some(message) = sink_rx.recv().await {
@@ -500,7 +519,13 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
                             Err(e) => warn!("Write records error: {:?}", e),
                             Ok(_) => (),
                         },
-                        SinkMessage::Flush => warn!("FLUSH"),
+                        SinkMessage::Flush => {
+                            warn!("Flush");
+                            match tx.send(vec![ServerCommand::Flushed]).await {
+                                Err(e) => warn!("Send Flushed error: {:?}", e),
+                                Ok(_) => {}
+                            }
+                        }
                     }
                 }
             }
@@ -695,7 +720,7 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
 
                     if let Some(progress) = connected.progress() {
                         events
-                            .send(ServerEvent::Progress(
+                            .send(ServerEvent::Transferring(
                                 connected.device_id.clone(),
                                 connected.syncing_started.unwrap_or(SystemTime::now()),
                                 progress,
@@ -705,6 +730,12 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
                     }
                 }
                 None => todo!(),
+            }
+        }
+        ServerCommand::Flushed => {
+            for connected in devices.iter() {
+                let transition = connected.flushed();
+                connected.apply(transition, events, sink, sending).await?;
             }
         }
         ServerCommand::Tick => {
