@@ -26,7 +26,7 @@ use crate::{
 
 const STALLED_EXPECTING_MILLIS: u64 = 5000;
 const STALLED_RECEIVING_MILLIS: u64 = 500;
-const EXPIRED_MILLIS: u64 = 1000 * 60 * 2;
+const REQUIRES_MERGE_WIDTH: u64 = 500;
 
 #[derive(Debug)]
 pub enum SinkMessage {
@@ -63,12 +63,28 @@ pub enum ServerCommand {
     Tick,
 }
 
+#[derive(Clone)]
+struct Until(Instant);
+
+impl Until {
+    fn before(&self) -> bool {
+        Instant::now() < self.0
+    }
+}
+
+impl std::fmt::Debug for Until {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0 - Instant::now())
+    }
+}
+
 #[derive(Clone, Debug)]
 enum DeviceState {
     Discovered,
     Learning,
     Required(RecordRange),
     Receiving(RecordRange),
+    Stalled(Until),
     Synced,
     Failed,
 }
@@ -85,18 +101,17 @@ pub struct Statistics {
 }
 
 struct ConnectedDevice {
+    batch_size: u64,
     device_id: DeviceId,
     addr: SocketAddr,
-    batch_size: u64,
+    sync_id: String,
     state: DeviceState,
+    syncing_started: Option<SystemTime>,
+    progress_published: Option<Instant>,
     received_at: Option<Instant>,
     total_records: Option<u64>,
     received: RangeSetBlaze<u64>,
     backoff: ExponentialBackoff,
-    waiting_until: Option<Instant>,
-    sync_id: String,
-    syncing_started: Option<SystemTime>,
-    progress_published: Option<Instant>,
     statistics: Statistics,
 }
 
@@ -125,7 +140,6 @@ impl ConnectedDevice {
             total_records: None,
             received: RangeSetBlaze::new(),
             backoff: Self::stall_backoff(),
-            waiting_until: None,
             sync_id: new_sync_id(),
             syncing_started: None,
             progress_published: None,
@@ -163,27 +177,22 @@ impl ConnectedDevice {
 
                 Ok(Transition::Send(Message::Query, DeviceState::Learning))
             }
+            DeviceState::Stalled(until) => {
+                if until.before() {
+                    Ok(Transition::None)
+                } else {
+                    self.query_requires()
+                }
+            }
             _ => {
                 if self.is_stalled() {
                     if let Some(delay) = self.backoff.next_backoff() {
-                        info!(
-                            "{:?} STALL {:?} {:?}",
-                            self.device_id,
-                            self.last_received_at(),
-                            self.received_has_gaps()
-                        );
-
-                        self.waiting_until = Some(Instant::now() + delay);
-
-                        self.query_requires()
+                        info!("STALL {:?}", self.last_received_at(),);
+                        Ok(Transition::Direct(DeviceState::Stalled(Until(
+                            Instant::now() + delay,
+                        ))))
                     } else {
-                        info!(
-                            "{:?} FAILED {:?} {:?}",
-                            self.device_id,
-                            self.last_received_at(),
-                            self.received_has_gaps()
-                        );
-
+                        info!("FAILED {:?}", self.last_received_at(),);
                         Ok(Transition::Direct(DeviceState::Failed))
                     }
                 } else {
@@ -196,7 +205,6 @@ impl ConnectedDevice {
     fn handle(&mut self, message: &Message) -> Result<Transition> {
         self.statistics.messages_received += 1;
         self.received_at = Some(Instant::now());
-        self.waiting_until = None;
         self.backoff.reset();
 
         match message {
@@ -287,7 +295,11 @@ impl ConnectedDevice {
 
         let mut requiring: Option<RangeInclusive<u64>> = None;
         for range in total_required.into_ranges() {
-            requiring = try_merge(requiring, cap_length(range, self.batch_size), 500);
+            requiring = try_merge(
+                requiring,
+                cap_length(range, self.batch_size),
+                REQUIRES_MERGE_WIDTH,
+            );
         }
 
         requiring.map(RecordRange)
@@ -306,22 +318,7 @@ impl ConnectedDevice {
         self.last_received_at().map(|v| v > d).unwrap_or(false)
     }
 
-    fn is_expired(&self) -> bool {
-        match &self.state {
-            DeviceState::Receiving(_) => {
-                self.last_received_more_than(Duration::from_millis(EXPIRED_MILLIS))
-            }
-            _ => false,
-        }
-    }
-
     fn is_stalled(&self) -> bool {
-        if let Some(waiting_until) = self.waiting_until {
-            if Instant::now() < waiting_until {
-                return false;
-            }
-        }
-
         match &self.state {
             DeviceState::Learning | DeviceState::Required(_) => {
                 self.last_received_more_than(Duration::from_millis(STALLED_EXPECTING_MILLIS))
@@ -394,7 +391,7 @@ impl ConnectedDevice {
         sink: &Sender<SinkMessage>,
     ) -> Result<()> {
         info!(
-            "{:?} -> {:?} (publish:capacity = {}) (sink:capacity = {})",
+            "{:?} -> {:?} (publish = {}) (sink = {})",
             &self.state,
             &new,
             events.max_capacity() - events.capacity(),
@@ -627,6 +624,7 @@ impl Devices {
         }
     }
 
+    /*
     fn remove_expired(&mut self) {
         for (device_id, addr) in self
             .devices
@@ -640,6 +638,7 @@ impl Devices {
             self.devices.remove(&device_id);
         }
     }
+    */
 
     fn iter(&mut self) -> impl Iterator<Item = &mut ConnectedDevice> {
         self.devices.iter_mut().map(|(_, c)| c)
@@ -709,8 +708,6 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
             }
         }
         ServerCommand::Tick => {
-            devices.remove_expired();
-
             for connected in devices.iter() {
                 let transition = connected.tick()?;
                 connected.apply(transition, events, sink, sending).await?;
@@ -720,7 +717,7 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
             if let Some(connected) = devices.remove(device_id) {
                 info!("{:?} removed", device_id);
                 match connected.state {
-                    DeviceState::Synced => {}
+                    DeviceState::Failed | DeviceState::Synced => {}
                     _ => events.send(ServerEvent::Failed(device_id.clone())).await?,
                 }
             }
