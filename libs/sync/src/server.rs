@@ -6,7 +6,7 @@ use range_set_blaze::prelude::*;
 use std::{
     collections::HashMap,
     net::{SocketAddr, SocketAddrV4},
-    ops::{RangeInclusive, Sub},
+    ops::RangeInclusive,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -47,6 +47,7 @@ pub enum ServerCommand {
 }
 
 impl ServerCommand {
+    #[allow(dead_code)]
     pub fn name(&self) -> &str {
         match self {
             ServerCommand::Begin(_) => "begin",
@@ -386,11 +387,11 @@ impl ConnectedDevice {
         Ok(())
     }
 
-    async fn apply(
+    async fn apply<S: SendTransport>(
         &mut self,
         transition: Transition,
         publish: &Sender<ServerEvent>,
-        sender: &Sender<TransportMessage>,
+        sender: &S,
     ) -> Result<()> {
         match transition {
             Transition::None => Ok(()),
@@ -400,12 +401,16 @@ impl ConnectedDevice {
                 Ok(())
             }
             Transition::SendOnly(sending) => {
-                transmit(sender, &self.addr, sending).await?;
+                sender
+                    .send(TransportMessage((self.addr.clone(), sending)))
+                    .await?;
 
                 Ok(())
             }
             Transition::Send(sending, state) => {
-                transmit(sender, &self.addr, sending).await?;
+                sender
+                    .send(TransportMessage((self.addr.clone(), sending)))
+                    .await?;
 
                 self.transition(state, publish).await?;
 
@@ -456,8 +461,87 @@ impl RecordsSink for DevNullSink {
 pub struct TransportMessage((SocketAddr, Message));
 
 #[async_trait]
+pub trait SendTransport: Send + Sync + 'static {
+    async fn send(&self, message: TransportMessage) -> Result<()>;
+}
+
+#[async_trait]
+pub trait ReceiveTransport: Send + Sync + 'static {
+    async fn recv(&self) -> Result<Option<Vec<TransportMessage>>>;
+}
+
+#[async_trait]
 pub trait Transport {
-    async fn open(&self, received: Sender<Vec<ServerCommand>>) -> Result<Sender<TransportMessage>>;
+    type Send: SendTransport;
+    type Receive: ReceiveTransport;
+
+    async fn open(&self) -> Result<(Self::Send, Self::Receive)>;
+}
+
+#[derive(Clone)]
+pub struct OpenUdp {
+    socket: Arc<UdpSocket>,
+}
+
+#[async_trait]
+impl SendTransport for OpenUdp {
+    async fn send(&self, message: TransportMessage) -> Result<()> {
+        let TransportMessage((addr, message)) = message;
+        let mut buffer = Vec::new();
+        message.write(&mut buffer)?;
+
+        debug!("{:?} Sending {:?}", addr, buffer.len());
+
+        self.socket.send_to(&buffer, addr).await?;
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ReceiveTransport for OpenUdp {
+    async fn recv(&self) -> Result<Option<Vec<TransportMessage>>> {
+        let mut codec = MessageCodec::default();
+        let mut batch: Vec<TransportMessage> = Vec::new();
+
+        self.socket.readable().await.expect("Oops");
+
+        /*
+        if let Some(last_packet) = last_packet {
+            let elapsed = Instant::now().sub(last_packet);
+            if elapsed > Duration::from_millis(500) {
+                info!("last packet {:?}", elapsed);
+            }
+        }
+        last_packet = Some(Instant::now());
+        */
+
+        loop {
+            let mut buffer = vec![0u8; 4096];
+
+            match self.socket.try_recv_from(&mut buffer[..]) {
+                Ok((len, addr)) => {
+                    trace!("{:?} Received {:?}", addr, len);
+
+                    match codec.try_read(&buffer[..len]) {
+                        Ok(Some(message)) => {
+                            if let Message::Batch { flags: _flags } = message {
+                                info!("{:?} Batch", addr,)
+                            }
+
+                            batch.push(TransportMessage((addr, message)));
+                        }
+                        Ok(None) => {}
+                        Err(e) => warn!("Codec error: {}", e),
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Ok(Some(batch));
+                }
+                Err(e) => warn!("Receive error: {}", e),
+            }
+        }
+    }
 }
 
 pub struct UdpTransport {
@@ -472,100 +556,20 @@ impl UdpTransport {
 
 #[async_trait]
 impl Transport for UdpTransport {
-    async fn open(&self, received: Sender<Vec<ServerCommand>>) -> Result<Sender<TransportMessage>> {
+    type Send = OpenUdp;
+    type Receive = OpenUdp;
+
+    async fn open(&self) -> Result<(OpenUdp, OpenUdp)> {
         let listening_addr = SocketAddrV4::new(IP_ALL.into(), self.port);
-        let receiving = Arc::new(bind(&listening_addr)?);
-        let sending = receiving.clone();
+        let socket = Arc::new(bind(&listening_addr)?);
 
         info!("listening on {}", listening_addr);
 
-        // This were chosen arbitrarily.
-        let (send_tx, mut send_rx) = mpsc::channel::<TransportMessage>(32);
+        let sender = OpenUdp { socket };
 
-        // No amount of investigation into graceful exiting has been done.
-        tokio::spawn(async move {
-            let mut last_packet = None;
+        let receiver = sender.clone();
 
-            loop {
-                let mut codec = MessageCodec::default();
-                let mut batch: Vec<ServerCommand> = Vec::new();
-
-                receiving.readable().await.expect("Oops");
-
-                if let Some(last_packet) = last_packet {
-                    let elapsed = Instant::now().sub(last_packet);
-                    if elapsed > Duration::from_millis(500) {
-                        info!("last packet {:?}", elapsed);
-                    }
-                }
-                last_packet = Some(Instant::now());
-
-                loop {
-                    let mut buffer = vec![0u8; 4096];
-
-                    match receiving.try_recv_from(&mut buffer[..]) {
-                        Ok((len, addr)) => {
-                            trace!("{:?} Received {:?}", addr, len);
-
-                            match codec.try_read(&buffer[..len]) {
-                                Ok(Some(message)) => {
-                                    if let Message::Batch { flags: _flags } = message {
-                                        info!(
-                                            "{:?} Batch recv-queue = {}",
-                                            addr,
-                                            received.max_capacity() - received.capacity()
-                                        )
-                                    }
-
-                                    if received.capacity() < received.max_capacity() / 8 {
-                                        warn!(
-                                            "udp:receive:capacity = {}/{}",
-                                            received.capacity(),
-                                            received.max_capacity()
-                                        );
-                                    }
-
-                                    batch.push(ServerCommand::Received(TransportMessage((
-                                        addr, message,
-                                    ))));
-                                }
-                                Ok(None) => {}
-                                Err(e) => warn!("Codec error: {}", e),
-                            }
-                        }
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            match received.send(batch).await {
-                                Err(e) => warn!("Publish received error: {}", e),
-                                _ => {}
-                            }
-
-                            break;
-                        }
-                        Err(e) => warn!("Receive error: {}", e),
-                    }
-                }
-            }
-        });
-
-        // No amount of investigation into graceful exiting has been done.
-        tokio::spawn(async move {
-            while let Some(TransportMessage((addr, message))) = send_rx.recv().await {
-                let mut buffer = Vec::new();
-                match message.write(&mut buffer) {
-                    Ok(_) => {
-                        debug!("{:?} Sending {:?}", addr, buffer.len());
-
-                        match sending.send_to(&buffer, addr).await {
-                            Ok(_) => {}
-                            Err(e) => warn!("Udp send error: {}", e),
-                        }
-                    }
-                    Err(e) => warn!("Codec error: {}", e),
-                }
-            }
-        });
-
-        Ok(send_tx)
+        Ok((sender, receiver))
     }
 }
 
@@ -605,7 +609,7 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
     pub async fn run(&self, publish: Sender<ServerEvent>) -> Result<()> {
         let (tx, mut rx) = mpsc::channel::<Vec<ServerCommand>>(1024);
 
-        let sending = self.transport.open(tx.clone()).await?;
+        let (send, receive) = self.transport.open().await?;
 
         let (sink_tx, mut sink_rx) = mpsc::channel::<ReceivedRecords>(1024);
         let records_sink = Arc::clone(&self.records_sink);
@@ -617,6 +621,26 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
                     match sink.write(&received) {
                         Err(e) => warn!("Write records error: {:?}", e),
                         Ok(_) => (),
+                    }
+                }
+            }
+        });
+
+        let receiver = tokio::spawn({
+            let tx = tx.clone();
+            async move {
+                while let Ok(Some(received)) = receive.recv().await {
+                    match tx
+                        .send(
+                            received
+                                .into_iter()
+                                .map(|m| ServerCommand::Received(m))
+                                .collect(),
+                        )
+                        .await
+                    {
+                        Err(e) => warn!("Error forwarding received: {:?}", e),
+                        Ok(_) => {}
                     }
                 }
             }
@@ -638,9 +662,9 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
                         );
                     }
                     for cmd in batch.iter() {
-                        match handle_server_command::<R>(
+                        match handle_server_command::<R, T::Send>(
                             cmd,
-                            &sending,
+                            &send,
                             &publish,
                             &sink_tx,
                             &mut devices,
@@ -670,6 +694,7 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
 
         tokio::select! {
             _ = drain_sink => Ok(()),
+            _ = receiver => Ok(()),
             _ = pump => Ok(()),
             _ = timer => Ok(())
         }
@@ -759,9 +784,9 @@ impl Devices {
     }
 }
 
-async fn handle_server_command<R: RecordsSink>(
+async fn handle_server_command<R: RecordsSink, S: SendTransport>(
     cmd: &ServerCommand,
-    sending: &Sender<TransportMessage>,
+    sending: &S,
     publish: &Sender<ServerEvent>,
     sink: &Sender<ReceivedRecords>,
     devices: &mut Devices,
@@ -832,48 +857,51 @@ async fn handle_server_command<R: RecordsSink>(
     Ok(())
 }
 
-async fn transmit(tx: &Sender<TransportMessage>, addr: &SocketAddr, m: Message) -> Result<()> {
-    info!("{:?} to {:?} (capacity = {})", m, addr, tx.capacity());
-
-    Ok(tx.send(TransportMessage((addr.clone(), m))).await?)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
-    use tokio::sync::{mpsc::Receiver, Mutex};
+    use tokio::sync::Mutex;
 
     use super::*;
 
     #[allow(dead_code)]
-    pub struct TokioTransport {
-        first: Mutex<Cell<Option<(Sender<TransportMessage>, Receiver<TransportMessage>)>>>,
-        second: Mutex<Cell<Option<(Sender<TransportMessage>, Receiver<TransportMessage>)>>>,
+    #[derive(Default)]
+    pub struct VectorTransport {
+        open: OpenVectorTransport,
     }
 
-    impl TokioTransport {}
+    impl VectorTransport {}
 
-    impl Default for TokioTransport {
-        fn default() -> Self {
-            let (inbox_tx, inbox_rx) = mpsc::channel::<TransportMessage>(256);
-            let (outbox_tx, outbox_rx) = mpsc::channel::<TransportMessage>(256);
+    #[derive(Default, Clone)]
+    pub struct OpenVectorTransport {
+        outbox: Arc<Mutex<Vec<TransportMessage>>>,
+        inbox: Arc<Mutex<Vec<TransportMessage>>>,
+    }
 
-            Self {
-                first: Mutex::new(Cell::new(Some((inbox_tx, outbox_rx)))),
-                second: Mutex::new(Cell::new(Some((outbox_tx, inbox_rx)))),
-            }
+    #[async_trait]
+    impl SendTransport for OpenVectorTransport {
+        async fn send(&self, message: TransportMessage) -> Result<()> {
+            let mut outbox = self.outbox.lock().await;
+            outbox.push(message);
+
+            Ok(())
         }
     }
 
     #[async_trait]
-    impl Transport for TokioTransport {
-        async fn open(
-            &self,
-            _received: Sender<Vec<ServerCommand>>,
-        ) -> Result<Sender<TransportMessage>> {
-            let second = self.second.lock().await;
-            Ok(second.take().unwrap().0)
+    impl ReceiveTransport for OpenVectorTransport {
+        async fn recv(&self) -> Result<Option<Vec<TransportMessage>>> {
+            let mut inbox = self.inbox.lock().await;
+            Ok(inbox.pop().map(|m| vec![m]))
+        }
+    }
+
+    #[async_trait]
+    impl Transport for VectorTransport {
+        type Send = OpenVectorTransport;
+        type Receive = OpenVectorTransport;
+
+        async fn open(&self) -> Result<(Self::Send, Self::Receive)> {
+            Ok((self.open.clone(), self.open.clone()))
         }
     }
 
@@ -887,7 +915,7 @@ mod tests {
 
     #[test]
     pub fn test_server() {
-        let transport = TokioTransport::default();
+        let transport = VectorTransport::default();
         let _server = Server::new(transport, DevNullSink::default());
     }
 
