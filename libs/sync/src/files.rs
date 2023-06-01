@@ -9,7 +9,7 @@ use std::{
     sync::Mutex,
 };
 
-use crate::{server::ReceivedRecords, RecordsSink};
+use crate::{proto::ReceivedRecords, RecordsSink};
 
 struct Previous {
     path: PathBuf,

@@ -95,7 +95,6 @@ pub struct StationDownload {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) mod test {
     use super::*;
 
@@ -115,6 +114,7 @@ pub(crate) mod test {
             BuildModule::default()
         }
 
+        #[allow(dead_code)]
         pub fn sensor(&self) -> BuildSensor {
             BuildSensor::default()
         }
@@ -187,6 +187,7 @@ pub(crate) mod test {
             self.hardware_id(name).named(name).sensor().sensor()
         }
 
+        #[allow(dead_code)]
         pub fn position(mut self, position: u32) -> Self {
             self.position = position;
             self
@@ -259,6 +260,7 @@ pub(crate) mod test {
             self
         }
 
+        #[allow(dead_code)]
         pub fn number(mut self, number: u32) -> Self {
             self.number = number;
             self

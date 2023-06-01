@@ -1,17 +1,15 @@
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use backoff::{backoff::Backoff, ExponentialBackoff, ExponentialBackoffBuilder};
 use discovery::{DeviceId, Discovered};
 use range_set_blaze::prelude::*;
 use std::{
     collections::HashMap,
-    net::{SocketAddr, SocketAddrV4},
+    net::SocketAddr,
     ops::RangeInclusive,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 use tokio::{
-    net::UdpSocket,
     sync::mpsc::Sender,
     sync::mpsc::{self},
     sync::Mutex,
@@ -21,14 +19,33 @@ use tracing::*;
 
 use crate::{
     progress::{Progress, RangeProgress},
-    proto::{Message, MessageCodec, NumberedRecord, RecordRange},
+    proto::{Message, ReceivedRecords, RecordRange},
+    transport::{ReceiveTransport, SendTransport},
+    Transport, TransportMessage,
 };
 
-const IP_ALL: [u8; 4] = [0, 0, 0, 0];
 const STALLED_EXPECTING_MILLIS: u64 = 5000;
 const STALLED_RECEIVING_MILLIS: u64 = 500;
 const EXPIRED_MILLIS: u64 = 1000 * 60 * 2;
-const DEFAULT_PORT: u16 = 22144;
+
+#[derive(Debug)]
+pub enum SinkMessage {
+    Records(ReceivedRecords),
+    Flush,
+}
+
+pub trait RecordsSink: Send + Sync {
+    fn write(&self, records: &ReceivedRecords) -> Result<()>;
+}
+
+#[derive(Default)]
+pub struct DevNullSink {}
+
+impl RecordsSink for DevNullSink {
+    fn write(&self, _records: &ReceivedRecords) -> Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub enum ServerEvent {
@@ -44,18 +61,6 @@ pub enum ServerCommand {
     Cancel(DeviceId),
     Received(TransportMessage),
     Tick,
-}
-
-impl ServerCommand {
-    #[allow(dead_code)]
-    pub fn name(&self) -> &str {
-        match self {
-            ServerCommand::Begin(_) => "begin",
-            ServerCommand::Cancel(_) => "cancel",
-            ServerCommand::Received(_) => "received",
-            ServerCommand::Tick => "tick",
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -95,11 +100,9 @@ struct ConnectedDevice {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 enum Transition {
     None,
     Direct(DeviceState),
-    SendOnly(Message),
     Send(Message, DeviceState),
 }
 
@@ -408,13 +411,6 @@ impl ConnectedDevice {
 
                 Ok(())
             }
-            Transition::SendOnly(sending) => {
-                sender
-                    .send(TransportMessage((self.addr.clone(), sending)))
-                    .await?;
-
-                Ok(())
-            }
             Transition::Send(sending, state) => {
                 sender
                     .send(TransportMessage((self.addr.clone(), sending)))
@@ -425,153 +421,6 @@ impl ConnectedDevice {
                 Ok(())
             }
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct ReceivedRecords {
-    pub device_id: DeviceId,
-    pub records: Vec<NumberedRecord>,
-}
-
-impl ReceivedRecords {
-    // Note that ReceivedRecords are always sequential, as they're constructed
-    // from incoming packets.
-    pub fn range(&self) -> Option<RangeInclusive<u64>> {
-        let numbers = self.records.iter().map(|r| r.number);
-        let first = numbers.clone().min();
-        let last = numbers.max();
-        match (first, last) {
-            (Some(first), Some(last)) => Some(first..=last),
-            _ => None,
-        }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &NumberedRecord> {
-        self.records.iter()
-    }
-}
-
-#[derive(Debug)]
-pub enum SinkMessage {
-    Records(ReceivedRecords),
-    Flush,
-}
-
-pub trait RecordsSink: Send + Sync {
-    fn write(&self, records: &ReceivedRecords) -> Result<()>;
-}
-
-#[derive(Default)]
-pub struct DevNullSink {}
-
-impl RecordsSink for DevNullSink {
-    fn write(&self, _records: &ReceivedRecords) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct TransportMessage((SocketAddr, Message));
-
-#[async_trait]
-pub trait SendTransport: Send + Sync + 'static {
-    async fn send(&self, message: TransportMessage) -> Result<()>;
-}
-
-#[async_trait]
-pub trait ReceiveTransport: Send + Sync + 'static {
-    async fn recv(&self) -> Result<Option<Vec<TransportMessage>>>;
-}
-
-#[async_trait]
-pub trait Transport {
-    type Send: SendTransport;
-    type Receive: ReceiveTransport;
-
-    async fn open(&self) -> Result<(Self::Send, Self::Receive)>;
-}
-
-#[derive(Clone)]
-pub struct OpenUdp {
-    socket: Arc<UdpSocket>,
-}
-
-#[async_trait]
-impl SendTransport for OpenUdp {
-    async fn send(&self, message: TransportMessage) -> Result<()> {
-        let TransportMessage((addr, message)) = message;
-        let mut buffer = Vec::new();
-        message.write(&mut buffer)?;
-
-        debug!("{:?} Sending {:?}", addr, buffer.len());
-        self.socket.send_to(&buffer, addr).await?;
-
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl ReceiveTransport for OpenUdp {
-    async fn recv(&self) -> Result<Option<Vec<TransportMessage>>> {
-        let mut codec = MessageCodec::default();
-        let mut batch: Vec<TransportMessage> = Vec::new();
-
-        self.socket.readable().await?;
-
-        loop {
-            let mut buffer = vec![0u8; 4096];
-
-            match self.socket.try_recv_from(&mut buffer[..]) {
-                Ok((len, addr)) => {
-                    trace!("{:?} Received {:?}", addr, len);
-
-                    match codec.try_read(&buffer[..len])? {
-                        Some(message) => {
-                            if let Message::Batch { flags: _flags } = message {
-                                info!("{:?} Batch", addr,)
-                            }
-
-                            batch.push(TransportMessage((addr, message)));
-                        }
-                        None => {}
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    return Ok(Some(batch));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-    }
-}
-
-pub struct UdpTransport {
-    port: u16,
-}
-
-impl UdpTransport {
-    pub fn new() -> Self {
-        Self { port: DEFAULT_PORT }
-    }
-}
-
-#[async_trait]
-impl Transport for UdpTransport {
-    type Send = OpenUdp;
-    type Receive = OpenUdp;
-
-    async fn open(&self) -> Result<(OpenUdp, OpenUdp)> {
-        let listening_addr = SocketAddrV4::new(IP_ALL.into(), self.port);
-        let socket = Arc::new(bind(&listening_addr)?);
-
-        info!("listening on {}", listening_addr);
-
-        let sender = OpenUdp { socket };
-
-        let receiver = sender.clone();
-
-        Ok((sender, receiver))
     }
 }
 
@@ -713,18 +562,6 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
     }
 }
 
-fn bind(addr: &SocketAddrV4) -> Result<UdpSocket> {
-    use socket2::{Domain, Protocol, Socket, Type};
-
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&socket2::SockAddr::from(*addr))?;
-
-    Ok(UdpSocket::from_std(socket.into())?)
-}
-
 struct Devices {
     devices: HashMap<DeviceId, ConnectedDevice>,
     by_addr: HashMap<SocketAddr, DeviceId>,
@@ -863,11 +700,13 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddrV4;
+
+    use async_trait::async_trait;
     use tokio::sync::Mutex;
 
     use super::*;
 
-    #[allow(dead_code)]
     #[derive(Default)]
     pub struct VectorTransport {
         open: OpenVectorTransport,
@@ -910,6 +749,7 @@ mod tests {
     }
 
     fn test_device() -> ConnectedDevice {
+        const IP_ALL: [u8; 4] = [0, 0, 0, 0];
         ConnectedDevice::new_with_batch_size(
             DeviceId("test-device".to_owned()),
             SocketAddrV4::new(IP_ALL.into(), 22144).into(),

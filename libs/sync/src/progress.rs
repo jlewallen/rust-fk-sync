@@ -1,6 +1,5 @@
-use std::ops::RangeInclusive;
-
 use range_set_blaze::RangeSetBlaze;
+use std::ops::RangeInclusive;
 
 pub struct RangeProgress {
     pub range: RangeInclusive<u64>,
@@ -34,7 +33,6 @@ impl std::fmt::Debug for RangeProgress {
     }
 }
 
-#[allow(dead_code)]
 pub struct Progress {
     pub total: Option<RangeProgress>,
     pub batch: Option<RangeProgress>,

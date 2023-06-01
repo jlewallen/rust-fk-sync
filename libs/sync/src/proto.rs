@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use discovery::DeviceId;
 use quick_protobuf::reader::BytesReader;
 use quick_protobuf::writer::Writer;
 use range_set_blaze::prelude::*;
@@ -51,6 +52,30 @@ impl NumberedRecord {
 
     pub fn bytes(&self) -> &[u8] {
         self.record.bytes()
+    }
+}
+
+#[derive(Debug)]
+pub struct ReceivedRecords {
+    pub device_id: DeviceId,
+    pub records: Vec<NumberedRecord>,
+}
+
+impl ReceivedRecords {
+    // Note that ReceivedRecords are always sequential, as they're constructed
+    // from incoming packets.
+    pub fn range(&self) -> Option<RangeInclusive<u64>> {
+        let numbers = self.records.iter().map(|r| r.number);
+        let first = numbers.clone().min();
+        let last = numbers.max();
+        match (first, last) {
+            (Some(first), Some(last)) => Some(first..=last),
+            _ => None,
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &NumberedRecord> {
+        self.records.iter()
     }
 }
 
@@ -152,114 +177,6 @@ const FK_UDP_PROTOCOL_KIND_STATISTICS: u32 = 1;
 const FK_UDP_PROTOCOL_KIND_REQUIRE: u32 = 2;
 const FK_UDP_PROTOCOL_KIND_RECORDS: u32 = 3;
 const FK_UDP_PROTOCOL_KIND_BATCH: u32 = 4;
-
-#[derive(Default)]
-pub(crate) struct MessageCodec {
-    partial: Option<(u64, u32)>,
-    buffered: Vec<u8>,
-}
-
-impl MessageCodec {
-    pub(crate) fn try_read(&mut self, bytes: &[u8]) -> Result<Option<Message>> {
-        let mut reader = BytesReader::from_bytes(bytes);
-
-        let (header, payload) = Message::read_header(&mut reader, bytes)?;
-
-        match payload {
-            Some(payload) => match header {
-                Message::Records {
-                    head,
-                    flags,
-                    sequence,
-                    records: _,
-                } => {
-                    if flags > 0 {
-                        self.buffered.extend(payload);
-
-                        match self.partial.clone() {
-                            Some(partial) => {
-                                if head != partial.0 {
-                                    warn!(
-                                        "Partial head mismatch ({} != {}) dropping",
-                                        head, partial.0
-                                    );
-                                    self.reset();
-                                }
-
-                                if sequence != partial.1 + 1 {
-                                    warn!(
-                                        "Partial sequence mismatch ({} != {}) dropping",
-                                        sequence, partial.1
-                                    );
-                                    self.reset();
-                                }
-
-                                let mut reader = BytesReader::from_bytes(&self.buffered);
-                                let records = self.read_raw_records(&mut reader, &self.buffered)?;
-
-                                match &records {
-                                    Some(_) => {
-                                        info!("Partial record #{}: Completed", head);
-                                        self.reset();
-                                    }
-                                    None => {
-                                        info!("Partial record #{}: Waiting for remainder", head);
-                                    }
-                                };
-
-                                Ok(records.map(|records| Message::Records {
-                                    head,
-                                    flags: 0,
-                                    sequence: 0,
-                                    records,
-                                }))
-                            }
-                            None => {
-                                self.partial = Some((head, sequence));
-
-                                // No need to try parsing as this is the first partial packet.
-                                Ok(None)
-                            }
-                        }
-                    } else {
-                        let records = self.read_raw_records(&mut reader, bytes)?;
-
-                        Ok(Some(Message::Records {
-                            head,
-                            flags,
-                            sequence,
-                            records: records.ok_or(anyhow!("Error parsing records"))?,
-                        }))
-                    }
-                }
-                _ => todo!(),
-            },
-            None => Ok(Some(header)),
-        }
-    }
-
-    fn reset(&mut self) {
-        self.partial = None;
-        self.buffered.clear();
-    }
-
-    fn read_raw_records(
-        &self,
-        reader: &mut BytesReader,
-        bytes: &[u8],
-    ) -> Result<Option<Vec<Record>>> {
-        let mut records = vec![];
-
-        while !reader.is_eof() {
-            match reader.read_bytes(bytes) {
-                Ok(record) => records.push(Record::Undelimited(record.into())),
-                Err(_) => return Ok(None),
-            }
-        }
-
-        Ok(Some(records))
-    }
-}
 
 impl Message {
     pub fn numbered_records(&self) -> Result<Option<Vec<NumberedRecord>>> {
@@ -383,6 +300,114 @@ impl Message {
             }
             _ => todo!(),
         }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct MessageCodec {
+    partial: Option<(u64, u32)>,
+    buffered: Vec<u8>,
+}
+
+impl MessageCodec {
+    pub(crate) fn try_read(&mut self, bytes: &[u8]) -> Result<Option<Message>> {
+        let mut reader = BytesReader::from_bytes(bytes);
+
+        let (header, payload) = Message::read_header(&mut reader, bytes)?;
+
+        match payload {
+            Some(payload) => match header {
+                Message::Records {
+                    head,
+                    flags,
+                    sequence,
+                    records: _,
+                } => {
+                    if flags > 0 {
+                        self.buffered.extend(payload);
+
+                        match self.partial.clone() {
+                            Some(partial) => {
+                                if head != partial.0 {
+                                    warn!(
+                                        "Partial head mismatch ({} != {}) dropping",
+                                        head, partial.0
+                                    );
+                                    self.reset();
+                                }
+
+                                if sequence != partial.1 + 1 {
+                                    warn!(
+                                        "Partial sequence mismatch ({} != {}) dropping",
+                                        sequence, partial.1
+                                    );
+                                    self.reset();
+                                }
+
+                                let mut reader = BytesReader::from_bytes(&self.buffered);
+                                let records = self.read_raw_records(&mut reader, &self.buffered)?;
+
+                                match &records {
+                                    Some(_) => {
+                                        info!("Partial record #{}: Completed", head);
+                                        self.reset();
+                                    }
+                                    None => {
+                                        info!("Partial record #{}: Waiting for remainder", head);
+                                    }
+                                };
+
+                                Ok(records.map(|records| Message::Records {
+                                    head,
+                                    flags: 0,
+                                    sequence: 0,
+                                    records,
+                                }))
+                            }
+                            None => {
+                                self.partial = Some((head, sequence));
+
+                                // No need to try parsing as this is the first partial packet.
+                                Ok(None)
+                            }
+                        }
+                    } else {
+                        let records = self.read_raw_records(&mut reader, bytes)?;
+
+                        Ok(Some(Message::Records {
+                            head,
+                            flags,
+                            sequence,
+                            records: records.ok_or(anyhow!("Error parsing records"))?,
+                        }))
+                    }
+                }
+                _ => todo!(),
+            },
+            None => Ok(Some(header)),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.partial = None;
+        self.buffered.clear();
+    }
+
+    fn read_raw_records(
+        &self,
+        reader: &mut BytesReader,
+        bytes: &[u8],
+    ) -> Result<Option<Vec<Record>>> {
+        let mut records = vec![];
+
+        while !reader.is_eof() {
+            match reader.read_bytes(bytes) {
+                Ok(record) => records.push(Record::Undelimited(record.into())),
+                Err(_) => return Ok(None),
+            }
+        }
+
+        Ok(Some(records))
     }
 }
 

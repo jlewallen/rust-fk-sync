@@ -2,9 +2,8 @@ mod files;
 mod progress;
 mod proto;
 mod server;
-
-pub use server::{
-    DevNullSink, RecordsSink, Server, ServerEvent, Transport, TransportMessage, UdpTransport,
-};
+mod transport;
 
 pub use files::FilesRecordSink;
+pub use server::{DevNullSink, RecordsSink, Server, ServerEvent};
+pub use transport::{Transport, TransportMessage, UdpTransport};
