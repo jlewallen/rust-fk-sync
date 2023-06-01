@@ -94,6 +94,7 @@ struct ConnectedDevice {
     received: RangeSetBlaze<u64>,
     backoff: ExponentialBackoff,
     waiting_until: Option<Instant>,
+    sync_id: String,
     syncing_started: Option<SystemTime>,
     progress_published: Option<Instant>,
     statistics: Statistics,
@@ -104,6 +105,13 @@ enum Transition {
     None,
     Direct(DeviceState),
     Send(Message, DeviceState),
+}
+
+fn new_sync_id() -> String {
+    use chrono::offset::Utc;
+    use chrono::DateTime;
+    let now: DateTime<Utc> = SystemTime::now().into();
+    now.format("%Y%m%d_%H%M%S").to_string()
 }
 
 impl ConnectedDevice {
@@ -118,6 +126,7 @@ impl ConnectedDevice {
             received: RangeSetBlaze::new(),
             backoff: Self::stall_backoff(),
             waiting_until: None,
+            sync_id: new_sync_id(),
             syncing_started: None,
             progress_published: None,
             statistics: Default::default(),
@@ -656,6 +665,7 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
 
                     if let Some(records) = message.numbered_records()? {
                         sink.send(SinkMessage::Records(ReceivedRecords {
+                            sync_id: connected.sync_id.clone(),
                             device_id: connected.device_id.clone(),
                             records,
                         }))

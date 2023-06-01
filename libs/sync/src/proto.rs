@@ -57,6 +57,7 @@ impl NumberedRecord {
 
 #[derive(Debug)]
 pub struct ReceivedRecords {
+    pub sync_id: String,
     pub device_id: DeviceId,
     pub records: Vec<NumberedRecord>,
 }

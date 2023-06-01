@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
+use tracing::info;
 
 use crate::{proto::ReceivedRecords, RecordsSink};
 
@@ -29,12 +30,8 @@ impl FilesRecordSink {
         }
     }
 
-    fn device_path(&self, device_id: &DeviceId) -> Result<PathBuf> {
-        let path = self.base_path.join(&device_id.0);
-
-        std::fs::create_dir_all(path.clone())?;
-
-        Ok(path)
+    fn device_path(&self, device_id: &DeviceId) -> PathBuf {
+        self.base_path.join(&device_id.0)
     }
 
     fn append(&self, records: &ReceivedRecords, file_path: &PathBuf) -> Result<()> {
@@ -57,11 +54,25 @@ impl FilesRecordSink {
             .range()
             .ok_or(anyhow!("No range on received records"))?;
 
-        let device_path = self
-            .device_path(&records.device_id)
-            .with_context(|| format!("Resolving device path {:?}", &records.device_id))?;
+        let device_path = self.device_path(&records.device_id);
 
-        let file_path = device_path.join(format!("{}.fkpb", range.start()));
+        let sync_path = device_path.join(&records.sync_id);
+
+        match std::fs::metadata(sync_path.clone()) {
+            Ok(md) => {
+                if !md.is_dir() {
+                    return Err(anyhow!("Unexpected not-a-directory"));
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!("Creating {}", sync_path.display());
+                std::fs::create_dir_all(sync_path.clone())
+                    .with_context(|| format!("Creating sync path {:?}", &sync_path))?;
+            }
+            Err(e) => Err(e)?,
+        }
+
+        let file_path = sync_path.join(format!("{}.fkpb", range.start()));
 
         self.append(records, &file_path)?;
 
@@ -178,6 +189,7 @@ mod tests {
     }
 
     pub struct ReceivedRecordsBuilder {
+        sync_id: String,
         device_id: DeviceId,
         records: Vec<NumberedRecord>,
         number: usize,
@@ -186,6 +198,7 @@ mod tests {
     impl ReceivedRecordsBuilder {
         fn new() -> Self {
             Self {
+                sync_id: "sync_id".to_owned(),
                 device_id: DeviceId("device".to_owned()),
                 records: Vec::new(),
                 number: 0,
@@ -194,6 +207,7 @@ mod tests {
 
         fn build(self) -> ReceivedRecords {
             ReceivedRecords {
+                sync_id: self.sync_id,
                 device_id: self.device_id,
                 records: self.records,
             }
@@ -201,6 +215,7 @@ mod tests {
 
         fn first(self, number: usize) -> Self {
             Self {
+                sync_id: self.sync_id,
                 device_id: self.device_id,
                 records: self.records,
                 number,
@@ -209,6 +224,7 @@ mod tests {
 
         fn records(self, number: usize) -> Self {
             Self {
+                sync_id: self.sync_id,
                 device_id: self.device_id,
                 records: (0..number)
                     .into_iter()
@@ -225,6 +241,7 @@ mod tests {
 
         fn gap(self, number: usize) -> Self {
             Self {
+                sync_id: self.sync_id,
                 device_id: self.device_id,
                 records: self.records,
                 number: self.number + number,
