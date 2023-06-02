@@ -68,29 +68,27 @@ async fn main() -> Result<()> {
                 })
                 .await?;
 
-            if let Some(tokens) = tokens {
-                let broken_client = client.to_authenticated(Tokens {
-                    token: "INVALID".to_string(),
-                })?;
-                match broken_client.query_ourselves().await {
-                    Ok(_) => panic!("Whoa, how'd that happen?"),
-                    Err(PortalError::HttpStatus(status)) => info!("http status: {:?}", status),
-                    Err(e) => info!("{:?}", e),
-                };
+            let broken_client = client.to_authenticated(Tokens {
+                token: "INVALID".to_string(),
+            })?;
+            match broken_client.query_ourselves().await {
+                Ok(_) => panic!("Whoa, how'd that happen?"),
+                Err(PortalError::HttpStatus(status)) => info!("http status: {:?}", status),
+                Err(e) => info!("{:?}", e),
+            };
 
-                let client = client.to_authenticated(tokens)?;
+            let client = client.to_authenticated(tokens)?;
 
-                let ourselves = client.query_ourselves().await.context("GET /user")?;
+            let ourselves = client.query_ourselves().await.context("GET /user")?;
 
-                println!("{:?}", ourselves);
+            println!("{:?}", ourselves);
 
-                let transmission_token = client
-                    .issue_transmission_token()
-                    .await
-                    .context("GET /transmission-token")?;
+            let transmission_token = client
+                .issue_transmission_token()
+                .await
+                .context("GET /transmission-token")?;
 
-                println!("{:?}", transmission_token);
-            }
+            println!("{:?}", transmission_token);
 
             Ok(())
         }

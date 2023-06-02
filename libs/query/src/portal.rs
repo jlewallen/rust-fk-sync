@@ -73,16 +73,16 @@ impl Client {
             .build()?)
     }
 
-    fn response_to_tokens(&self, response: Response) -> Result<Option<Tokens>, PortalError> {
+    fn response_to_tokens(&self, response: Response) -> Result<Tokens, PortalError> {
         if let Some(auth) = response.headers().get("authorization") {
             let token = auth.to_str()?.to_owned();
-            Ok(Some(Tokens { token }))
+            Ok(Tokens { token })
         } else {
-            Ok(None)
+            Err(PortalError::NoAuthorizationHeader)
         }
     }
 
-    pub async fn login(&self, login: LoginPayload) -> Result<Option<Tokens>, PortalError> {
+    pub async fn login(&self, login: LoginPayload) -> Result<Tokens, PortalError> {
         let req = self.build_post("/login", login).await?;
         let response = self.execute_req(req).await?;
 
@@ -97,10 +97,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn use_refresh_token(
-        &self,
-        refresh_token: &str,
-    ) -> Result<Option<Tokens>, PortalError> {
+    pub async fn use_refresh_token(&self, refresh_token: &str) -> Result<Tokens, PortalError> {
         let req = self
             .build_post("/refresh", json!({ "refreshToken": refresh_token }))
             .await?;
@@ -239,4 +236,6 @@ pub enum PortalError {
     JsonError(#[from] serde_json::Error),
     #[error("Unexpected error")]
     UnexpectedError,
+    #[error("Expected authorization header")]
+    NoAuthorizationHeader,
 }
