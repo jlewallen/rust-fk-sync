@@ -1,5 +1,6 @@
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine};
+use chrono::{DateTime, TimeZone, Utc};
 use reqwest::{header::HeaderMap, Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -101,7 +102,7 @@ impl Client {
         refresh_token: &str,
     ) -> Result<Option<Tokens>, PortalError> {
         let req = self
-            .build_post("/refresh", json!({ refresh_token: refresh_token }))
+            .build_post("/refresh", json!({ "refreshToken": refresh_token }))
             .await?;
         let response = self.execute_req(req).await?;
 
@@ -181,27 +182,43 @@ pub struct TransmissionToken {
 #[derive(Debug, Deserialize, Clone)]
 pub struct DecodedToken {
     pub email: String,
-    pub exp: u64,
-    pub iat: u64,
+    pub exp: i64,
+    pub iat: i64,
     pub refresh_token: String,
     pub scopes: Vec<String>,
     pub sub: u64,
 }
 
-pub fn decode_token(token: &str) -> Result<DecodedToken, PortalError> {
-    // Sorry, not sorry.
-    token
-        .split(".")
-        .skip(1)
-        .take(1)
-        .map(|p| Ok(std::str::from_utf8(&general_purpose::STANDARD_NO_PAD.decode(p)?)?.to_owned()))
-        .collect::<Result<Vec<_>, PortalError>>()?
-        .into_iter()
-        .map(|p| Ok(serde_json::from_str::<DecodedToken>(p.as_str())?))
-        .collect::<Result<Vec<_>, PortalError>>()?
-        .into_iter()
-        .next()
-        .ok_or(PortalError::UnexpectedError)
+impl DecodedToken {
+    pub fn decode(token: &str) -> Result<DecodedToken, PortalError> {
+        // Sorry, not sorry.
+        token
+            .split(".")
+            .skip(1)
+            .take(1)
+            .map(|p| {
+                Ok(std::str::from_utf8(&general_purpose::STANDARD_NO_PAD.decode(p)?)?.to_owned())
+            })
+            .collect::<Result<Vec<_>, PortalError>>()?
+            .into_iter()
+            .map(|p| Ok(serde_json::from_str::<DecodedToken>(p.as_str())?))
+            .collect::<Result<Vec<_>, PortalError>>()?
+            .into_iter()
+            .next()
+            .ok_or(PortalError::UnexpectedError)
+    }
+
+    pub fn issued(&self) -> DateTime<Utc> {
+        Utc.timestamp_opt(self.iat, 0).unwrap()
+    }
+
+    pub fn expires(&self) -> DateTime<Utc> {
+        Utc.timestamp_opt(self.exp, 0).unwrap()
+    }
+
+    pub fn remaining(&self) -> chrono::Duration {
+        self.expires() - Utc::now()
+    }
 }
 
 #[derive(Error, Debug)]
