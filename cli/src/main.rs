@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::QueryPortal) => {
-            let client = query::portal::Client::new()?;
+            let client = query::portal::Client::new("https://api.fieldkit.org")?;
             let tokens = client
                 .login(LoginPayload {
                     email: std::env::var("FK_EMAIL").context("FK_EMAIL is required.")?,

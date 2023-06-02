@@ -17,11 +17,11 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new() -> Result<Self, PortalError> {
-        Self::new_with_headers(HeaderMap::new())
+    pub fn new(base_url: &str) -> Result<Self, PortalError> {
+        Self::new_with_headers(base_url, HeaderMap::new())
     }
 
-    pub fn new_with_headers(mut headers: HeaderMap) -> Result<Self, PortalError> {
+    pub fn new_with_headers(base_url: &str, mut headers: HeaderMap) -> Result<Self, PortalError> {
         let sdk_version = std::env!("CARGO_PKG_VERSION");
         let user_agent = format!("rustfk ({})", sdk_version);
         headers.insert("user-agent", user_agent.parse()?);
@@ -32,9 +32,10 @@ impl Client {
             .default_headers(headers)
             .build()?;
 
-        let base_url = "https://api.fieldkit.org".to_owned();
-
-        Ok(Self { base_url, client })
+        Ok(Self {
+            base_url: base_url.to_owned(),
+            client,
+        })
     }
 
     async fn execute_req(&self, req: Request) -> Result<Response, PortalError> {
@@ -107,7 +108,7 @@ impl Client {
     }
 
     pub fn to_authenticated(&self, token: Tokens) -> Result<AuthenticatedClient, PortalError> {
-        AuthenticatedClient::new(token)
+        AuthenticatedClient::new(&self.base_url, token)
     }
 }
 
@@ -117,12 +118,12 @@ pub struct AuthenticatedClient {
 }
 
 impl AuthenticatedClient {
-    pub fn new(token: Tokens) -> Result<Self, PortalError> {
+    pub fn new(base_url: &str, token: Tokens) -> Result<Self, PortalError> {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", token.token.parse()?);
 
         Ok(Self {
-            plain: Client::new_with_headers(headers)?,
+            plain: Client::new_with_headers(base_url, headers)?,
         })
     }
 
