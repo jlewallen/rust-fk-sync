@@ -729,7 +729,7 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
                         connected.progress_published = Some(Instant::now());
                     }
                 }
-                None => todo!(),
+                None => warn!("Unsolicited message: {:?}", message),
             }
         }
         ServerCommand::Flushed => {
