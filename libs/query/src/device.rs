@@ -6,6 +6,10 @@ use std::io::Cursor;
 use std::time::Duration;
 use tracing::*;
 
+pub mod data {
+    include!(concat!(env!("OUT_DIR"), "/fk_data.rs"));
+}
+
 pub mod http {
     include!(concat!(env!("OUT_DIR"), "/fk_app.rs"));
 }
