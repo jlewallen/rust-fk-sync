@@ -48,7 +48,35 @@ impl Client {
         self.execute(req).await
     }
 
-    async fn execute(&self, req: reqwest::Request) -> Result<HttpReply> {
+    pub async fn clear_calibration(&self, addr: &str, module: usize) -> Result<ModuleHttpReply> {
+        let mut query = http::ModuleHttpQuery::default();
+        query.r#type = http::ModuleQueryType::ModuleQueryReset as i32;
+        let encoded = query.encode_length_delimited_to_vec();
+        let req = self
+            .new_module_request(addr, module)?
+            .body(encoded)
+            .build()?;
+        self.execute(req).await
+    }
+
+    pub async fn calibrate(
+        &self,
+        addr: &str,
+        module: usize,
+        data: &[u8],
+    ) -> Result<ModuleHttpReply> {
+        let mut query = http::ModuleHttpQuery::default();
+        query.r#type = http::ModuleQueryType::ModuleQueryConfigure as i32;
+        query.configuration = data.to_vec();
+        let encoded = query.encode_length_delimited_to_vec();
+        let req = self
+            .new_module_request(addr, module)?
+            .body(encoded)
+            .build()?;
+        self.execute(req).await
+    }
+
+    async fn execute<T: Message + Default>(&self, req: reqwest::Request) -> Result<T> {
         let url = req.url().clone();
 
         debug!("{} querying", &url);
@@ -56,7 +84,12 @@ impl Client {
         let bytes = response.bytes().await?;
 
         debug!("{} queried, got {} bytes", &url, bytes.len());
-        Ok(HttpReply::decode_length_delimited(bytes)?)
+        Ok(T::decode_length_delimited(bytes)?)
+    }
+
+    fn new_module_request(&self, addr: &str, module: usize) -> Result<RequestBuilder> {
+        let url = format!("http://{}/fk/v1/modules/{}", addr, module);
+        Ok(self.client.post(&url).timeout(Duration::from_secs(5)))
     }
 
     fn new_request(&self, addr: &str) -> Result<RequestBuilder> {
