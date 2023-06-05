@@ -13,7 +13,7 @@ use std::{
 use tracing::*;
 
 use crate::{
-    proto::{ReceivedRecords, Record},
+    proto::{Identity, ReceivedRecords, Record},
     RecordsSink,
 };
 
@@ -92,13 +92,13 @@ impl FilesRecordSink {
 
     fn join_files(
         &self,
-        device_id: DeviceId,
-        sync_id: String,
+        sync_id: &String,
+        identity: &Identity,
         files: Vec<RecordsFile>,
     ) -> Result<()> {
         assert_eq!(files.get(0).map(|f| f.head), Some(0));
 
-        let device_path = self.device_path(&device_id);
+        let device_path = self.device_path(&identity.device_id);
         let path = device_path.join(format!("{}.fkpb", sync_id));
 
         let mut writing = OpenOptions::new()
@@ -135,6 +135,22 @@ impl FilesRecordSink {
         }
 
         info!("{} Flushed {} records", path.display(), written);
+
+        Ok(())
+    }
+
+    fn write_identity(&self, sync_id: &String, identity: &Identity) -> Result<()> {
+        let device_path = self.device_path(&identity.device_id);
+        let path = device_path.join(format!("{}.meta.fkpb", sync_id));
+
+        let mut writing = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .with_context(|| format!("Creating {:?}", &path))?;
+
+        writing.write(&identity.to_bytes()?)?;
 
         Ok(())
     }
@@ -198,8 +214,8 @@ impl RecordsSink for FilesRecordSink {
         Ok(())
     }
 
-    fn flush(&self, device_id: DeviceId, sync_id: String) -> Result<()> {
-        let device_path = self.device_path(&device_id);
+    fn flush(&self, sync_id: String, identity: Identity) -> Result<()> {
+        let device_path = self.device_path(&identity.device_id);
         let sync_path = device_path.join(&sync_id);
 
         info!("flushing {:?}", &sync_path);
@@ -211,7 +227,9 @@ impl RecordsSink for FilesRecordSink {
             .sorted_unstable_by_key(|r| r.head)
             .collect();
 
-        self.join_files(device_id, sync_id, files)?;
+        self.join_files(&sync_id, &identity, files)?;
+
+        self.write_identity(&sync_id, &identity)?;
 
         Ok(())
     }

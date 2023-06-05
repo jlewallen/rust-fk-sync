@@ -31,12 +31,12 @@ const REQUIRES_MERGE_WIDTH: u64 = 500;
 #[derive(Debug)]
 pub enum SinkMessage {
     Records(ReceivedRecords),
-    Flush(DeviceId, String),
+    Flush(String, Identity),
 }
 
 pub trait RecordsSink: Send + Sync {
     fn write(&self, records: &ReceivedRecords) -> Result<()>;
-    fn flush(&self, device_id: DeviceId, sync_id: String) -> Result<()>;
+    fn flush(&self, sync_id: String, identity: Identity) -> Result<()>;
 }
 
 #[derive(Default)]
@@ -47,7 +47,7 @@ impl RecordsSink for DevNullSink {
         Ok(())
     }
 
-    fn flush(&self, _device_id: DeviceId, _sync_id: String) -> Result<()> {
+    fn flush(&self, _sync_id: String, _identity: Identity) -> Result<()> {
         Ok(())
     }
 }
@@ -432,8 +432,10 @@ impl ConnectedDevice {
                     .send(ServerEvent::Processing(self.device_id.clone()))
                     .await?;
                 sink.send(SinkMessage::Flush(
-                    self.device_id.clone(),
                     self.sync_id.clone(),
+                    self.identity
+                        .clone()
+                        .ok_or_else(|| anyhow!("No identity in Flush"))?,
                 ))
                 .await?;
             }
@@ -531,9 +533,9 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
                             Err(e) => warn!("Write records error: {:?}", e),
                             Ok(_) => (),
                         },
-                        SinkMessage::Flush(device_id, sync_id) => {
+                        SinkMessage::Flush(sync_id, identity) => {
                             info!("flushing");
-                            match sink.flush(device_id, sync_id) {
+                            match sink.flush(sync_id, identity) {
                                 Err(e) => warn!("Send Flushed error: {:?}", e),
                                 Ok(_) => match tx.send(vec![ServerCommand::Flushed]).await {
                                     Err(e) => warn!("Send Flushed error: {:?}", e),
