@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use discovery::DeviceId;
+use itertools::*;
+use quick_protobuf::Reader;
 use std::{
     collections::HashMap,
     fs::OpenOptions,
@@ -8,9 +10,12 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use tracing::info;
+use tracing::*;
 
-use crate::{proto::ReceivedRecords, RecordsSink};
+use crate::{
+    proto::{ReceivedRecords, Record},
+    RecordsSink,
+};
 
 struct Previous {
     path: PathBuf,
@@ -43,7 +48,7 @@ impl FilesRecordSink {
             .with_context(|| format!("Creating {:?}", &file_path))?;
 
         for record in records.iter() {
-            writing.write(record.bytes())?;
+            writing.write(record.to_delimited()?.bytes())?;
         }
 
         Ok(())
@@ -78,6 +83,86 @@ impl FilesRecordSink {
 
         Ok(file_path)
     }
+
+    #[allow(dead_code)]
+    fn get_device_ids(&self) -> Result<Vec<DeviceId>> {
+        let previous = self.previous.lock().expect("Lock error");
+        Ok(previous.keys().map(|d| d.clone()).collect())
+    }
+
+    fn join_files(
+        &self,
+        device_id: DeviceId,
+        sync_id: String,
+        files: Vec<RecordsFile>,
+    ) -> Result<()> {
+        assert_eq!(files.get(0).map(|f| f.head), Some(0));
+
+        let device_path = self.device_path(&device_id);
+        let path = device_path.join(format!("{}.fkpb", sync_id));
+
+        let mut writing = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .with_context(|| format!("Creating {:?}", &path))?;
+
+        let mut written = 0;
+
+        for file in files.iter() {
+            let mut skipping = written - file.head;
+            debug!("{:?} Records={:?} Skipped={:?}", file, written, skipping);
+            assert!(skipping >= 0);
+
+            let mut reader = Reader::from_file(&file.path)?;
+            while let Some(record) = reader.read(|r, b| {
+                if r.is_eof() {
+                    Ok(None)
+                } else {
+                    Ok(Some(r.read_bytes(b)?))
+                }
+            })? {
+                if skipping == 0 {
+                    let record = Record::Undelimited(record.to_vec());
+                    let record = record.to_delimited()?;
+                    writing.write(record.bytes())?;
+                    written += 1;
+                } else {
+                    skipping -= 1;
+                }
+            }
+        }
+
+        info!("{} Flushed {} records", path.display(), written);
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct RecordsFile {
+    path: PathBuf,
+    head: i64,
+}
+
+impl RecordsFile {
+    fn new(path: &PathBuf) -> Result<Self> {
+        let name = path.file_name().expect("No file name on path");
+        let head = name
+            .to_os_string()
+            .into_string()
+            .map_err(|_| anyhow!("Quirky file name"))?
+            .split(".")
+            .next()
+            .map(|v| Ok(v.parse()?))
+            .unwrap_or(Err(anyhow!("Malformed record file name")))?;
+
+        Ok(Self {
+            path: path.clone(),
+            head,
+        })
+    }
 }
 
 impl RecordsSink for FilesRecordSink {
@@ -109,6 +194,24 @@ impl RecordsSink for FilesRecordSink {
                 );
             }
         }
+
+        Ok(())
+    }
+
+    fn flush(&self, device_id: DeviceId, sync_id: String) -> Result<()> {
+        let device_path = self.device_path(&device_id);
+        let sync_path = device_path.join(&sync_id);
+
+        info!("flushing {:?}", &sync_path);
+
+        let files: Vec<_> = std::fs::read_dir(sync_path)?
+            .map(|entry| Ok(RecordsFile::new(&entry?.path())?))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .sorted_unstable_by_key(|r| r.head)
+            .collect();
+
+        self.join_files(device_id, sync_id, files)?;
 
         Ok(())
     }
@@ -231,7 +334,7 @@ mod tests {
                     .map(|n| NumberedRecord {
                         number: (n + self.number) as u64,
                         record: Record::new_all_zeros(256)
-                            .into_delimited()
+                            .to_delimited()
                             .expect("Error creating delimited test record."),
                     })
                     .collect(),

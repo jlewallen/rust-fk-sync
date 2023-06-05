@@ -31,11 +31,12 @@ const REQUIRES_MERGE_WIDTH: u64 = 500;
 #[derive(Debug)]
 pub enum SinkMessage {
     Records(ReceivedRecords),
-    Flush,
+    Flush(DeviceId, String),
 }
 
 pub trait RecordsSink: Send + Sync {
     fn write(&self, records: &ReceivedRecords) -> Result<()>;
+    fn flush(&self, device_id: DeviceId, sync_id: String) -> Result<()>;
 }
 
 #[derive(Default)]
@@ -43,6 +44,10 @@ pub struct DevNullSink {}
 
 impl RecordsSink for DevNullSink {
     fn write(&self, _records: &ReceivedRecords) -> Result<()> {
+        Ok(())
+    }
+
+    fn flush(&self, _device_id: DeviceId, _sync_id: String) -> Result<()> {
         Ok(())
     }
 }
@@ -423,7 +428,11 @@ impl ConnectedDevice {
                 events
                     .send(ServerEvent::Processing(self.device_id.clone()))
                     .await?;
-                sink.send(SinkMessage::Flush).await?;
+                sink.send(SinkMessage::Flush(
+                    self.device_id.clone(),
+                    self.sync_id.clone(),
+                ))
+                .await?;
             }
             (_, DeviceState::Synced) => {
                 events
@@ -519,11 +528,14 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
                             Err(e) => warn!("Write records error: {:?}", e),
                             Ok(_) => (),
                         },
-                        SinkMessage::Flush => {
-                            warn!("Flush");
-                            match tx.send(vec![ServerCommand::Flushed]).await {
+                        SinkMessage::Flush(device_id, sync_id) => {
+                            info!("flushing");
+                            match sink.flush(device_id, sync_id) {
                                 Err(e) => warn!("Send Flushed error: {:?}", e),
-                                Ok(_) => {}
+                                Ok(_) => match tx.send(vec![ServerCommand::Flushed]).await {
+                                    Err(e) => warn!("Send Flushed error: {:?}", e),
+                                    Ok(_) => {}
+                                },
                             }
                         }
                     }

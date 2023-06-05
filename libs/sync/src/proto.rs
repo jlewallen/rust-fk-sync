@@ -53,6 +53,13 @@ impl NumberedRecord {
     pub fn bytes(&self) -> &[u8] {
         self.record.bytes()
     }
+
+    pub fn to_delimited(&self) -> Result<Self> {
+        Ok(Self {
+            number: self.number,
+            record: self.record.to_delimited()?,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -83,7 +90,6 @@ impl ReceivedRecords {
 #[derive(PartialEq, Eq, Clone)]
 pub enum Record {
     Undelimited(Vec<u8>),
-    #[cfg(test)]
     Bytes(Vec<u8>),
 }
 
@@ -91,7 +97,6 @@ impl std::fmt::Debug for Record {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Record::Undelimited(bytes) => f.debug_tuple("Undelimited").field(&bytes.len()).finish(),
-            #[cfg(test)]
             Record::Bytes(bytes) => f.debug_tuple("Bytes").field(&bytes.len()).finish(),
         }
     }
@@ -101,7 +106,6 @@ impl Record {
     pub fn bytes(&self) -> &[u8] {
         match self {
             Record::Undelimited(bytes) => bytes,
-            #[cfg(test)]
             Record::Bytes(bytes) => bytes,
         }
     }
@@ -112,8 +116,7 @@ impl Record {
         Self::Undelimited(zeros)
     }
 
-    #[cfg(test)]
-    pub fn into_delimited(self) -> Result<Record> {
+    pub fn to_delimited(&self) -> Result<Record> {
         match self {
             Record::Undelimited(bytes) | Record::Bytes(bytes) => {
                 let mut writing = Vec::new();
@@ -122,22 +125,6 @@ impl Record {
                     writer.write_bytes(&bytes)?;
                 }
                 Ok(Self::Bytes(writing))
-            }
-        }
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn into_undelimited(self) -> Result<Vec<Record>> {
-        match self {
-            Record::Undelimited(bytes) => Ok(vec![Record::Undelimited(bytes)]),
-            Record::Bytes(bytes) => {
-                let mut records = vec![];
-                let mut reader = BytesReader::from_bytes(&bytes);
-                while !reader.is_eof() {
-                    records.push(Record::Undelimited(reader.read_bytes(&bytes)?.into()));
-                }
-                Ok(records)
             }
         }
     }
@@ -231,7 +218,6 @@ impl Message {
                 for record in records {
                     match record {
                         Record::Undelimited(bytes) => writer.write_bytes(bytes)?,
-                        #[cfg(test)]
                         Record::Bytes(bytes) => {
                             // I really wish I could find a better way to do this.
                             for byte in bytes.iter() {
@@ -509,7 +495,7 @@ mod tests {
     #[test]
     pub fn test_serialization_records_partial() -> Result<()> {
         let original = Record::new_all_zeros(1024);
-        let r1 = original.clone().into_delimited()?;
+        let r1 = original.clone().to_delimited()?;
         let (first, second) = r1.split_off(386);
 
         let m1 = Message::Records {
