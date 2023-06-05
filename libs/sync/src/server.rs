@@ -19,7 +19,7 @@ use tracing::*;
 
 use crate::{
     progress::{Progress, RangeProgress},
-    proto::{Message, ReceivedRecords, RecordRange},
+    proto::{Identity, Message, ReceivedRecords, RecordRange},
     transport::{ReceiveTransport, SendTransport},
     Transport, TransportMessage,
 };
@@ -114,6 +114,7 @@ struct ConnectedDevice {
     addr: SocketAddr,
     sync_id: String,
     state: DeviceState,
+    identity: Option<Identity>,
     syncing_started: Option<SystemTime>,
     progress_published: Option<Instant>,
     received_at: Option<Instant>,
@@ -144,6 +145,7 @@ impl ConnectedDevice {
             addr,
             batch_size,
             state: DeviceState::Discovered,
+            identity: None,
             received_at: None,
             total_records: None,
             received: RangeSetBlaze::new(),
@@ -226,7 +228,8 @@ impl ConnectedDevice {
         self.backoff.reset();
 
         match message {
-            Message::Statistics { nrecords } => {
+            Message::Statistics { nrecords, identity } => {
+                self.identity = Some(identity.clone());
                 self.total_records = Some(*nrecords);
                 self.syncing_started = Some(SystemTime::now());
                 self.query_requires()

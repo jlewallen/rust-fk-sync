@@ -7,6 +7,9 @@ edition = "2021"
 [dependencies.discovery]
 path = "../discovery"
 
+[dependencies.query]
+path = "../query"
+
 [dev-dependencies]
 tempdir = "0.3.7"
 
@@ -19,6 +22,7 @@ hex = "0.4.3"
 itertools = "0.10.5"
 lazy_static = "1.4.0"
 miette = "5.8.0"
+prost = "0.11.9"
 quick-protobuf = "0.8.1"
 range-set-blaze = "0.1.5"
 socket2 = "0.4.7"
