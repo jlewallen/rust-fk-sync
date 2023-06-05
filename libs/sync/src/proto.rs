@@ -144,9 +144,36 @@ impl Record {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Identity {
-    device_id: DeviceId,
-    generation_id: String,
-    name: String,
+    pub device_id: DeviceId,
+    pub generation_id: String,
+    pub name: String,
+}
+
+impl Identity {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Identity> {
+        use prost::Message;
+        use query::device::http::Identity as WireIdentity;
+        let wire_identity = WireIdentity::decode(bytes)?;
+        let device_id = DeviceId(hex::encode(wire_identity.device_id));
+        let generation_id = hex::encode(wire_identity.generation_id);
+        Ok(Identity {
+            device_id,
+            generation_id: generation_id,
+            name: wire_identity.name,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        use prost::Message;
+        use query::device::http::Identity as WireIdentity;
+        let wire_identity = WireIdentity {
+            device_id: hex::decode(self.device_id.0.clone())?,
+            generation_id: hex::decode(self.generation_id.clone())?,
+            name: self.name.clone(),
+            ..Default::default()
+        };
+        Ok(wire_identity.encode_to_vec())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -202,17 +229,7 @@ impl Message {
                 Ok(())
             }
             Message::Statistics { nrecords, identity } => {
-                use prost::Message;
-                use query::device::http::Identity as WireIdentity;
-
-                let wire_identity = WireIdentity {
-                    device_id: hex::decode(identity.device_id.0.clone())?,
-                    generation_id: hex::decode(identity.generation_id.clone())?,
-                    name: identity.name.clone(),
-                    ..Default::default()
-                };
-
-                let encoded = wire_identity.encode_to_vec();
+                let encoded = identity.to_bytes()?;
 
                 writer.write_fixed32(FK_UDP_PROTOCOL_KIND_STATISTICS)?;
                 writer.write_fixed32(*nrecords as u32)?;
@@ -275,18 +292,9 @@ impl Message {
         match kind {
             FK_UDP_PROTOCOL_KIND_QUERY => Ok((Self::Query {}, None)),
             FK_UDP_PROTOCOL_KIND_STATISTICS => {
-                use prost::Message;
-                use query::device::http::Identity as WireIdentity;
                 let nrecords = reader.read_fixed32(bytes)? as u64;
                 let identity_bytes = reader.read_bytes(bytes)?;
-                let wire_identity = WireIdentity::decode(identity_bytes)?;
-                let device_id = DeviceId(hex::encode(wire_identity.device_id));
-                let generation_id = hex::encode(wire_identity.generation_id);
-                let identity = Identity {
-                    device_id,
-                    generation_id: generation_id,
-                    name: wire_identity.name,
-                };
+                let identity = Identity::from_bytes(identity_bytes)?;
 
                 Ok((Self::Statistics { nrecords, identity }, None))
             }
