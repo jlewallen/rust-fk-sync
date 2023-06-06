@@ -14,6 +14,12 @@ const DEFAULT_UDP_SERVER_PORT: u16 = 22144;
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct DeviceId(pub String);
 
+impl Into<String> for DeviceId {
+    fn into(self) -> String {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Discovered {
     pub device_id: DeviceId,

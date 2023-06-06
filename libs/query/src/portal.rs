@@ -14,6 +14,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::fs::File;
+use tokio::sync::mpsc::Sender;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 
@@ -123,8 +124,20 @@ impl Client {
     }
 }
 
-pub trait WantsUploadProgress {
-    fn progress(&self, total: u64, uploaded: u64) -> Result<()>;
+#[derive(Debug)]
+pub struct BytesUploaded {
+    pub bytes_uploaded: u64,
+    pub total_bytes: u64,
+}
+
+impl BytesUploaded {
+    pub fn completed(&self) -> bool {
+        self.bytes_uploaded >= self.total_bytes
+    }
+}
+
+pub trait CreatesFromBytesUploaded<M>: Send + Sync {
+    fn from(&self, bytes: BytesUploaded) -> M;
 }
 
 #[derive(Debug)]
@@ -156,9 +169,14 @@ impl AuthenticatedClient {
         Ok(response.json().await?)
     }
 
-    pub async fn upload_readings<P>(&self, path: &Path, progress: P) -> Result<(), PortalError>
+    pub async fn upload_readings<M>(
+        &self,
+        path: &Path,
+        progress: Sender<M>,
+        factory: impl CreatesFromBytesUploaded<M> + 'static,
+    ) -> Result<(), PortalError>
     where
-        P: WantsUploadProgress + Send + Sync + 'static,
+        M: std::fmt::Debug + Send + Sync + 'static,
     {
         use tokio_stream::StreamExt;
 
@@ -182,7 +200,7 @@ impl AuthenticatedClient {
 
         let file = File::open(path).await?;
         let md = file.metadata().await?;
-        let total_size = md.len();
+        let total_bytes = md.len();
 
         let mut uploaded = 0;
 
@@ -190,8 +208,10 @@ impl AuthenticatedClient {
         let async_stream = async_stream::stream! {
             while let Some(chunk) = reader_stream.next().await {
                 if let Ok(chunk) = &chunk {
-                    uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_size);
-                    if let Err(e) = progress.progress(total_size, uploaded) {
+                    uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_bytes);
+
+                    let bytes_uploaded = BytesUploaded { bytes_uploaded: uploaded, total_bytes };
+                    if let Err(e) = progress.send(factory.from( bytes_uploaded)).await {
                         warn!("Progress receiver error: {:?}", e);
                     }
                 }
@@ -201,13 +221,13 @@ impl AuthenticatedClient {
 
         let url = format!("{}{}", self.plain.base_url, "/ingestion");
 
-        info!(%url, "uploading {} bytes", total_size);
+        info!(%url, "uploading {} bytes", total_bytes);
 
         let response = reqwest::Client::new()
             .post(&url)
             .headers(header_map)
             .header("content-type", "application/octet-stream")
-            .header("content-length", format!("{}", total_size))
+            .header("content-length", format!("{}", total_bytes))
             .header("authorization", self.tokens.token.clone())
             .body(reqwest::Body::wrap_stream(async_stream))
             .send()
