@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use discovery::DeviceId;
 use itertools::*;
+use query::portal::FileMeta;
 use quick_protobuf::Reader;
 use std::{
     collections::HashMap,
@@ -95,7 +96,7 @@ impl FilesRecordSink {
         sync_id: &String,
         identity: &Identity,
         files: Vec<RecordsFile>,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         assert_eq!(files.get(0).map(|f| f.head), Some(0));
 
         let device_path = self.device_path(&identity.device_id);
@@ -136,21 +137,39 @@ impl FilesRecordSink {
 
         info!("{} Flushed {} records", path.display(), written);
 
-        Ok(())
+        Ok(written)
     }
 
-    fn write_identity(&self, sync_id: &String, identity: &Identity) -> Result<()> {
+    fn write_identity(
+        &self,
+        sync_id: &String,
+        identity: &Identity,
+        total_records: i64,
+    ) -> Result<()> {
         let device_path = self.device_path(&identity.device_id);
-        let path = device_path.join(format!("{}.meta.fkpb", sync_id));
+        let path = device_path.join(format!("{}.fkpb.json", sync_id));
 
-        let mut writing = OpenOptions::new()
+        let writing = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(&path)
             .with_context(|| format!("Creating {:?}", &path))?;
 
-        writing.write(&identity.to_bytes()?)?;
+        let mut headers = identity.to_headers_map();
+        // Yes, this appears to be "last record number" instead of "total number
+        // of records" based on the firmware.
+        headers.insert(
+            "Fk-Blocks".to_owned(),
+            format!("{},{}", 0, total_records - 1),
+        );
+        headers.insert("Fk-Type".to_owned(), "data".to_owned());
+
+        let fm = FileMeta { headers };
+
+        serde_json::to_writer(writing, &fm)?;
+
+        info!("{} Wrote", &path.display());
 
         Ok(())
     }
@@ -227,9 +246,9 @@ impl RecordsSink for FilesRecordSink {
             .sorted_unstable_by_key(|r| r.head)
             .collect();
 
-        self.join_files(&sync_id, &identity, files)?;
+        let total_records = self.join_files(&sync_id, &identity, files)?;
 
-        self.write_identity(&sync_id, &identity)?;
+        self.write_identity(&sync_id, &identity, total_records)?;
 
         Ok(())
     }

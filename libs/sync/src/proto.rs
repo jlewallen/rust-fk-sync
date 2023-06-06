@@ -3,6 +3,7 @@ use discovery::DeviceId;
 use quick_protobuf::reader::BytesReader;
 use quick_protobuf::writer::Writer;
 use range_set_blaze::prelude::*;
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use tracing::*;
 
@@ -150,6 +151,14 @@ pub struct Identity {
 }
 
 impl Identity {
+    pub fn to_headers_map(&self) -> HashMap<String, String> {
+        HashMap::from([
+            ("Fk-DeviceId".to_owned(), self.device_id.0.clone()),
+            ("Fk-Generation".to_owned(), self.generation_id.clone()),
+            ("Fk-DeviceName".to_owned(), self.name.clone()),
+        ])
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Identity> {
         use prost::Message;
         use query::device::http::Identity as WireIdentity;

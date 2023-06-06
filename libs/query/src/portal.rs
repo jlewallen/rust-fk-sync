@@ -1,12 +1,21 @@
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine};
 use chrono::{DateTime, TimeZone, Utc};
-use reqwest::{header::HeaderMap, Request, Response};
+use reqwest::{
+    header::{HeaderMap, HeaderName, HeaderValue},
+    Request, Response,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use thiserror::Error;
-use tracing::debug;
+use tokio::{fs::File, io::AsyncReadExt};
+use tokio_util::io::ReaderStream;
+use tracing::{debug, info};
 
 pub use reqwest::{header::InvalidHeaderValue, header::ToStrError, StatusCode};
 
@@ -114,15 +123,17 @@ impl Client {
 
 #[derive(Debug)]
 pub struct AuthenticatedClient {
+    tokens: Tokens,
     plain: Client,
 }
 
 impl AuthenticatedClient {
-    pub fn new(base_url: &str, token: Tokens) -> Result<Self, PortalError> {
+    pub fn new(base_url: &str, tokens: Tokens) -> Result<Self, PortalError> {
         let mut headers = HeaderMap::new();
-        headers.insert("authorization", token.token.parse()?);
+        headers.insert("authorization", tokens.token.parse()?);
 
         Ok(Self {
+            tokens,
             plain: Client::new_with_headers(base_url, headers)?,
         })
     }
@@ -137,6 +148,79 @@ impl AuthenticatedClient {
         let req = self.plain.build_get("/user/transmission-token").await?;
         let response = self.plain.execute_req(req).await?;
         Ok(response.json().await?)
+    }
+
+    pub async fn upload_readings(&self, path: &Path) -> Result<(), PortalError> {
+        use tokio_stream::StreamExt;
+
+        let json_path = PathBuf::from(format!("{}.json", path.display()));
+        let file_meta = FileMeta::load_from_json(&json_path).await?;
+
+        let header_map: HeaderMap = file_meta
+            .headers
+            .into_iter()
+            .map(|(k, v)| {
+                Ok((
+                    HeaderName::from_lowercase(k.to_lowercase().as_bytes())?,
+                    HeaderValue::from_str(&v)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .collect();
+
+        info!("headers {:?}", &header_map);
+
+        let md = std::fs::metadata(path)?;
+        let total_size = md.len();
+
+        let mut reader_stream = ReaderStream::new(File::open(path).await?);
+        let mut uploaded = 0;
+
+        let async_stream = async_stream::stream! {
+            while let Some(chunk) = reader_stream.next().await {
+                if let Ok(chunk) = &chunk {
+                    let new = std::cmp::min(uploaded + (chunk.len() as u64), total_size);
+                    uploaded = new;
+                    println!("uploaded: {:?}", uploaded)
+                }
+                yield chunk;
+            }
+        };
+
+        let url = format!("{}{}", self.plain.base_url, "/ingestion");
+
+        info!(%url, "uploading {} bytes", total_size);
+
+        let response = reqwest::Client::new()
+            .post(&url)
+            .headers(header_map)
+            .header("content-type", "application/octet-stream")
+            .header("content-length", format!("{}", total_size))
+            .header("authorization", self.tokens.token.clone())
+            .body(reqwest::Body::wrap_stream(async_stream))
+            .send()
+            .await?;
+
+        let body: serde_json::Value = response.json().await?;
+
+        info!("{:?}", body);
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileMeta {
+    pub headers: HashMap<String, String>,
+}
+
+impl FileMeta {
+    pub async fn load_from_json(path: &Path) -> Result<Self> {
+        let mut file = File::open(path).await?;
+        let mut string = String::new();
+        file.read_to_string(&mut string).await?;
+        Ok(serde_json::from_str(&string)?)
     }
 }
 
@@ -223,6 +307,8 @@ impl DecodedToken {
 pub enum PortalError {
     #[error("HTTP error")]
     Request(#[from] reqwest::Error),
+    #[error("IO error")]
+    Io(#[from] std::io::Error),
     #[error("Invalid header value")]
     InvalidHeaderValue(#[from] InvalidHeaderValue),
     #[error("Conversion error")]
@@ -239,4 +325,6 @@ pub enum PortalError {
     UnexpectedError,
     #[error("Expected authorization header")]
     NoAuthorizationHeader,
+    #[error("General error")]
+    General(#[from] anyhow::Error),
 }
