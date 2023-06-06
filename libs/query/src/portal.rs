@@ -180,12 +180,13 @@ impl AuthenticatedClient {
 
         info!("headers {:?}", &header_map);
 
-        let md = std::fs::metadata(path)?;
+        let file = File::open(path).await?;
+        let md = file.metadata().await?;
         let total_size = md.len();
 
-        let mut reader_stream = ReaderStream::new(File::open(path).await?);
         let mut uploaded = 0;
 
+        let mut reader_stream = ReaderStream::new(file);
         let async_stream = async_stream::stream! {
             while let Some(chunk) = reader_stream.next().await {
                 if let Ok(chunk) = &chunk {
