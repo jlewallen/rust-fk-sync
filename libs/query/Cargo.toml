@@ -4,13 +4,13 @@ version = "0.1.0"
 authors = [ "Jacob Lewallen <jlewallen@gmail.com>" ]
 edition = "2021"
 
+[dependencies.protos]
+path = "../protos"
+
 [dependencies]
 anyhow = "1.0.71"
 thiserror = "1.0.40"
 tracing = "0.1.37"
-# This is using rustls-tls instead of native-tls-vendored or something because
-# of a build error about a missing arm-linux-androideabi-ranlib.
-reqwest = { version = "0.11.17", default-features = false, features = ["gzip", "stream", "rustls-tls", "json"] }
 prost = "0.11.9"
 bytes = "1.4.0"
 miette = "5.8.0"
@@ -22,6 +22,6 @@ async-stream = "0.3.5"
 tokio-util = "0.7.8"
 tokio = { version = "1.28.2", features = ["full"] }
 tokio-stream = "0.1.14"
-
-[build-dependencies]
-prost-build = "0.11.9"
+# This is using rustls-tls instead of native-tls-vendored or something because
+# of a build error about a missing arm-linux-androideabi-ranlib.
+reqwest = { version = "0.11.17", default-features = false, features = ["gzip", "stream", "rustls-tls", "json"] }

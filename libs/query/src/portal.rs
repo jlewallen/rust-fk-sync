@@ -1,6 +1,7 @@
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine};
 use chrono::{DateTime, TimeZone, Utc};
+use reqwest::{header::InvalidHeaderValue, header::ToStrError};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
     Request, Response,
@@ -8,16 +9,17 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     time::Duration,
 };
 use thiserror::Error;
-use tokio::{fs::File, io::AsyncReadExt};
+use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 
-pub use reqwest::{header::InvalidHeaderValue, header::ToStrError, StatusCode};
+use protos::FileMeta;
+
+pub use reqwest::StatusCode;
 
 #[derive(Debug)]
 pub struct Client {
@@ -215,20 +217,6 @@ impl AuthenticatedClient {
         info!("{:?}", body);
 
         Ok(())
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct FileMeta {
-    pub headers: HashMap<String, String>,
-}
-
-impl FileMeta {
-    pub async fn load_from_json(path: &Path) -> Result<Self> {
-        let mut file = File::open(path).await?;
-        let mut string = String::new();
-        file.read_to_string(&mut string).await?;
-        Ok(serde_json::from_str(&string)?)
     }
 }
 

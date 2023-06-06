@@ -6,15 +6,7 @@ use std::io::Cursor;
 use std::time::Duration;
 use tracing::*;
 
-pub mod data {
-    include!(concat!(env!("OUT_DIR"), "/fk_data.rs"));
-}
-
-pub mod http {
-    include!(concat!(env!("OUT_DIR"), "/fk_app.rs"));
-}
-
-pub use http::*;
+pub use protos::http::*;
 
 pub struct Client {
     client: reqwest::Client,
@@ -49,8 +41,8 @@ impl Client {
     }
 
     pub async fn clear_calibration(&self, addr: &str, module: usize) -> Result<ModuleHttpReply> {
-        let mut query = http::ModuleHttpQuery::default();
-        query.r#type = http::ModuleQueryType::ModuleQueryReset as i32;
+        let mut query = ModuleHttpQuery::default();
+        query.r#type = ModuleQueryType::ModuleQueryReset as i32;
         let encoded = query.encode_length_delimited_to_vec();
         let req = self
             .new_module_request(addr, module)?
@@ -65,8 +57,8 @@ impl Client {
         module: usize,
         data: &[u8],
     ) -> Result<ModuleHttpReply> {
-        let mut query = http::ModuleHttpQuery::default();
-        query.r#type = http::ModuleQueryType::ModuleQueryConfigure as i32;
+        let mut query = ModuleHttpQuery::default();
+        query.r#type = ModuleQueryType::ModuleQueryConfigure as i32;
         query.configuration = data.to_vec();
         let encoded = query.encode_length_delimited_to_vec();
         let req = self

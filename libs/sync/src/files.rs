@@ -1,7 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use discovery::DeviceId;
 use itertools::*;
-use query::portal::FileMeta;
 use quick_protobuf::Reader;
 use std::{
     collections::HashMap,
@@ -17,6 +15,8 @@ use crate::{
     proto::{Identity, ReceivedRecords, Record},
     RecordsSink,
 };
+use discovery::DeviceId;
+use protos::FileMeta;
 
 struct Previous {
     path: PathBuf,

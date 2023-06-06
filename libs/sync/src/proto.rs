@@ -161,7 +161,7 @@ impl Identity {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Identity> {
         use prost::Message;
-        use query::device::http::Identity as WireIdentity;
+        use protos::http::Identity as WireIdentity;
         let wire_identity = WireIdentity::decode(bytes)?;
         let device_id = DeviceId(hex::encode(wire_identity.device_id));
         let generation_id = hex::encode(wire_identity.generation_id);
@@ -174,7 +174,7 @@ impl Identity {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         use prost::Message;
-        use query::device::http::Identity as WireIdentity;
+        use protos::http::Identity as WireIdentity;
         let wire_identity = WireIdentity {
             device_id: hex::decode(self.device_id.0.clone())?,
             generation_id: hex::decode(self.generation_id.clone())?,

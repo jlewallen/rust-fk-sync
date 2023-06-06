@@ -7,8 +7,8 @@ edition = "2021"
 [dependencies.discovery]
 path = "../discovery"
 
-[dependencies.query]
-path = "../query"
+[dependencies.protos]
+path = "../protos"
 
 [dev-dependencies]
 tempdir = "0.3.7"
