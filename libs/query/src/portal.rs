@@ -15,7 +15,7 @@ use std::{
 use thiserror::Error;
 use tokio::{fs::File, io::AsyncReadExt};
 use tokio_util::io::ReaderStream;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub use reqwest::{header::InvalidHeaderValue, header::ToStrError, StatusCode};
 
@@ -121,6 +121,10 @@ impl Client {
     }
 }
 
+pub trait WantsUploadProgress {
+    fn progress(&self, total: u64, uploaded: u64) -> Result<()>;
+}
+
 #[derive(Debug)]
 pub struct AuthenticatedClient {
     tokens: Tokens,
@@ -150,7 +154,10 @@ impl AuthenticatedClient {
         Ok(response.json().await?)
     }
 
-    pub async fn upload_readings(&self, path: &Path) -> Result<(), PortalError> {
+    pub async fn upload_readings<P>(&self, path: &Path, progress: P) -> Result<(), PortalError>
+    where
+        P: WantsUploadProgress + Send + Sync + 'static,
+    {
         use tokio_stream::StreamExt;
 
         let json_path = PathBuf::from(format!("{}.json", path.display()));
@@ -180,9 +187,10 @@ impl AuthenticatedClient {
         let async_stream = async_stream::stream! {
             while let Some(chunk) = reader_stream.next().await {
                 if let Ok(chunk) = &chunk {
-                    let new = std::cmp::min(uploaded + (chunk.len() as u64), total_size);
-                    uploaded = new;
-                    println!("uploaded: {:?}", uploaded)
+                    uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_size);
+                    if let Err(e) = progress.progress(total_size, uploaded) {
+                        warn!("Progress receiver error: {:?}", e);
+                    }
                 }
                 yield chunk;
             }
