@@ -4,11 +4,11 @@ use std::{collections::HashMap, path::Path};
 use tokio::{fs::File, io::AsyncReadExt};
 
 pub mod data {
-    include!(concat!(env!("OUT_DIR"), "/fk_data.rs"));
+    include!("fk_data.rs");
 }
 
 pub mod http {
-    include!(concat!(env!("OUT_DIR"), "/fk_app.rs"));
+    include!("fk_app.rs");
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
