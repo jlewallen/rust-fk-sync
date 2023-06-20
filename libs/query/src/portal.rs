@@ -1,13 +1,15 @@
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::serde::ts_seconds::deserialize as from_ts;
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use reqwest::{header::InvalidHeaderValue, header::ToStrError};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
     Request, Response,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -119,9 +121,50 @@ impl Client {
         self.response_to_tokens(response)
     }
 
+    pub async fn available_firmware(&self) -> Result<Vec<Firmware>> {
+        let req = self.build_get("/firmware").await?;
+        let response = self.execute_req(req).await?;
+        let firmwares: Firmwares = response.json().await?;
+
+        Ok(firmwares.firmwares)
+    }
+
     pub fn to_authenticated(&self, token: Tokens) -> Result<AuthenticatedClient, PortalError> {
         AuthenticatedClient::new(&self.base_url, token)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct Firmwares {
+    firmwares: Vec<Firmware>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Firmware {
+    pub id: i64,
+    #[serde(deserialize_with = "deserialize_firmware_time")]
+    pub time: DateTime<Utc>,
+    pub etag: String,
+    pub module: String,
+    pub profile: String,
+    pub version: String,
+    pub url: String,
+    #[serde(rename = "buildNumber")]
+    pub build_number: i64,
+    #[serde(rename = "buildTime", deserialize_with = "from_ts")]
+    pub build_time: DateTime<Utc>,
+    pub meta: HashMap<String, String>,
+}
+
+fn deserialize_firmware_time<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: String = Deserialize::deserialize(deserializer)?;
+    NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S.%f +0000")
+        .or_else(|_| NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S.%f +0000 +0000"))
+        .map_err(serde::de::Error::custom)
+        .map(|v| DateTime::from_utc(v, Utc))
 }
 
 #[derive(Debug)]

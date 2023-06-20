@@ -68,6 +68,8 @@ async fn main() -> Result<()> {
                 })
                 .await?;
 
+            info!("{:?}", client.available_firmware().await?);
+
             let broken_client = client.to_authenticated(Tokens {
                 token: "INVALID".to_string(),
             })?;
