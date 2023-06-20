@@ -3,10 +3,16 @@ use prost::Message;
 use reqwest::header::HeaderMap;
 use reqwest::RequestBuilder;
 use std::io::Cursor;
+use std::path::Path;
 use std::time::Duration;
+use tokio::fs::File;
+use tokio_stream::StreamExt;
+use tokio_util::io::ReaderStream;
 use tracing::*;
 
 pub use protos::http::*;
+
+use crate::BytesUploaded;
 
 pub struct Client {
     client: reqwest::Client,
@@ -66,6 +72,58 @@ impl Client {
             .body(encoded)
             .build()?;
         self.execute(req).await
+    }
+
+    pub async fn upgrade<ProgressFn>(
+        &self,
+        addr: &str,
+        path: &Path,
+        swap: bool,
+        mut progress: ProgressFn,
+    ) -> Result<()>
+    where
+        ProgressFn: FnMut(BytesUploaded) -> Result<(), std::io::Error> + Send + Sync + 'static,
+    {
+        let file = File::open(path).await?;
+        let md = file.metadata().await?;
+        let total_bytes = md.len();
+
+        let mut bytes_uploaded = 0;
+
+        let mut reader_stream = ReaderStream::new(file);
+
+        let async_stream = async_stream::stream! {
+            while let Some(chunk) = reader_stream.next().await {
+                if let Ok(chunk) = &chunk {
+                    bytes_uploaded = std::cmp::min(bytes_uploaded + (chunk.len() as u64), total_bytes);
+
+                    progress(BytesUploaded {
+                        bytes_uploaded,
+                        total_bytes,
+                    })?;
+                }
+
+                yield chunk;
+            }
+        };
+
+        let url = format!("http://{}/fk/v1/upload/firmware", addr);
+        let url = if swap { format!("{}?swap=1", url) } else { url };
+
+        info!(%url, "uploading {} bytes", total_bytes);
+
+        let response = reqwest::Client::new()
+            .post(&url)
+            .header("content-length", format!("{}", total_bytes))
+            .body(reqwest::Body::wrap_stream(async_stream))
+            .send()
+            .await?;
+
+        let body: serde_json::Value = response.json().await?;
+
+        info!("{:?}", body);
+
+        Ok(())
     }
 
     async fn execute<T: Message + Default>(&self, req: reqwest::Request) -> Result<T> {

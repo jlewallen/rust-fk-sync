@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine};
 use chrono::serde::ts_seconds::deserialize as from_ts;
@@ -10,6 +11,7 @@ use reqwest::{
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::io::Write;
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -17,12 +19,16 @@ use std::{
 use thiserror::Error;
 use tokio::fs::File;
 use tokio::sync::mpsc::Sender;
+use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 
 use protos::FileMeta;
 
 pub use reqwest::StatusCode;
+
+use crate::BytesDownloaded;
+use crate::BytesUploaded;
 
 #[derive(Debug)]
 pub struct Client {
@@ -129,6 +135,38 @@ impl Client {
         Ok(firmwares.firmwares)
     }
 
+    pub async fn download_firmware<ProgressFn>(
+        &self,
+        firmware: &Firmware,
+        path: &Path,
+        mut progress: ProgressFn,
+    ) -> Result<(), PortalError>
+    where
+        ProgressFn: FnMut(BytesDownloaded) -> Result<()>,
+    {
+        let response = reqwest::get(&format!("{}{}", self.base_url, firmware.url)).await?;
+        let total_bytes = response
+            .content_length()
+            .ok_or_else(|| anyhow!("Missing Content-Length"))?;
+
+        let mut file = std::fs::File::create(path)?;
+        let mut stream = response.bytes_stream();
+        let mut bytes_downloaded: u64 = 0;
+
+        while let Some(item) = stream.next().await {
+            let chunk = item.or_else(|_| Err(anyhow!("Error while downloading firmware")))?;
+            file.write_all(&chunk)?;
+
+            bytes_downloaded = std::cmp::min(bytes_downloaded + (chunk.len() as u64), total_bytes);
+            progress(BytesDownloaded {
+                bytes_downloaded,
+                total_bytes,
+            })?;
+        }
+
+        Ok(())
+    }
+
     pub fn to_authenticated(&self, token: Tokens) -> Result<AuthenticatedClient, PortalError> {
         AuthenticatedClient::new(&self.base_url, token)
     }
@@ -165,18 +203,6 @@ where
         .or_else(|_| NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S.%f +0000 +0000"))
         .map_err(serde::de::Error::custom)
         .map(|v| DateTime::from_utc(v, Utc))
-}
-
-#[derive(Debug)]
-pub struct BytesUploaded {
-    pub bytes_uploaded: u64,
-    pub total_bytes: u64,
-}
-
-impl BytesUploaded {
-    pub fn completed(&self) -> bool {
-        self.bytes_uploaded >= self.total_bytes
-    }
 }
 
 pub trait CreatesFromBytesUploaded<M>: Send + Sync {
@@ -221,8 +247,6 @@ impl AuthenticatedClient {
     where
         M: std::fmt::Debug + Send + Sync + 'static,
     {
-        use tokio_stream::StreamExt;
-
         let json_path = PathBuf::from(format!("{}.json", path.display()));
         let file_meta = FileMeta::load_from_json(&json_path).await?;
 

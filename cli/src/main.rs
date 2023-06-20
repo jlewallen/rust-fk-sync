@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use query::portal::{LoginPayload, PortalError, Tokens};
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{signal, sync::mpsc};
 use tracing::*;
 use tracing_subscriber::prelude::*;
@@ -68,7 +71,18 @@ async fn main() -> Result<()> {
                 })
                 .await?;
 
-            info!("{:?}", client.available_firmware().await?);
+            let firmwares = client.available_firmware().await?;
+            info!("{:?}", firmwares);
+
+            let firmware = firmwares.get(0).unwrap();
+            let path = PathBuf::from("firmware.bin");
+
+            client
+                .download_firmware(firmware, &path, |p| {
+                    info!("{:?}", p);
+                    Ok(())
+                })
+                .await?;
 
             let broken_client = client.to_authenticated(Tokens {
                 token: "INVALID".to_string(),
