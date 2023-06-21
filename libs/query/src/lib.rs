@@ -7,6 +7,12 @@ pub struct BytesDownloaded {
     pub total_bytes: u64,
 }
 
+impl BytesDownloaded {
+    pub fn completed(&self) -> bool {
+        self.bytes_downloaded >= self.total_bytes
+    }
+}
+
 #[derive(Debug)]
 pub struct BytesUploaded {
     pub bytes_uploaded: u64,

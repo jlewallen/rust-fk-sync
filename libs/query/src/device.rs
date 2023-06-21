@@ -6,12 +6,14 @@ use std::io::Cursor;
 use std::path::Path;
 use std::time::Duration;
 use tokio::fs::File;
+use tokio::sync::mpsc::Sender;
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
 use tracing::*;
 
 pub use protos::http::*;
 
+use crate::portal::CreatesFromBytesUploaded;
 use crate::BytesUploaded;
 
 pub struct Client {
@@ -74,33 +76,34 @@ impl Client {
         self.execute(req).await
     }
 
-    pub async fn upgrade<ProgressFn>(
+    pub async fn upgrade<M>(
         &self,
         addr: &str,
         path: &Path,
         swap: bool,
-        mut progress: ProgressFn,
+        progress: Sender<M>,
+        factory: impl CreatesFromBytesUploaded<M> + 'static,
     ) -> Result<()>
     where
-        ProgressFn: FnMut(BytesUploaded) -> Result<(), std::io::Error> + Send + Sync + 'static,
+        M: std::fmt::Debug + Send + Sync + 'static,
     {
         let file = File::open(path).await?;
         let md = file.metadata().await?;
         let total_bytes = md.len();
 
-        let mut bytes_uploaded = 0;
+        let mut uploaded = 0;
 
         let mut reader_stream = ReaderStream::new(file);
 
         let async_stream = async_stream::stream! {
             while let Some(chunk) = reader_stream.next().await {
                 if let Ok(chunk) = &chunk {
-                    bytes_uploaded = std::cmp::min(bytes_uploaded + (chunk.len() as u64), total_bytes);
+                    uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_bytes);
 
-                    progress(BytesUploaded {
-                        bytes_uploaded,
-                        total_bytes,
-                    })?;
+                    let bytes_uploaded = BytesUploaded { bytes_uploaded: uploaded, total_bytes };
+                    if let Err(e) = progress.send(factory.from(bytes_uploaded)).await {
+                        warn!("Progress receiver error: {:?}", e);
+                    }
                 }
 
                 yield chunk;

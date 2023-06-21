@@ -136,14 +136,15 @@ impl Client {
         Ok(firmwares.firmwares)
     }
 
-    pub async fn download_firmware<ProgressFn>(
+    pub async fn download_firmware<M>(
         &self,
         firmware: &Firmware,
         path: &Path,
-        mut progress: ProgressFn,
+        progress: Sender<M>,
+        factory: impl CreatesFromBytesDownloaded<M> + 'static,
     ) -> Result<(), PortalError>
     where
-        ProgressFn: FnMut(BytesDownloaded) -> Result<()>,
+        M: std::fmt::Debug + Send + Sync + 'static,
     {
         let response = reqwest::get(&format!("{}{}", self.base_url, firmware.url)).await?;
         let total_bytes = response
@@ -152,17 +153,20 @@ impl Client {
 
         let mut file = std::fs::File::create(path)?;
         let mut stream = response.bytes_stream();
-        let mut bytes_downloaded: u64 = 0;
+        let mut downloaded: u64 = 0;
 
         while let Some(item) = stream.next().await {
             let chunk = item.or_else(|_| Err(anyhow!("Error while downloading firmware")))?;
             file.write_all(&chunk)?;
 
-            bytes_downloaded = std::cmp::min(bytes_downloaded + (chunk.len() as u64), total_bytes);
-            progress(BytesDownloaded {
-                bytes_downloaded,
+            downloaded = std::cmp::min(downloaded + (chunk.len() as u64), total_bytes);
+            let bytes_downloaded = BytesDownloaded {
+                bytes_downloaded: downloaded,
                 total_bytes,
-            })?;
+            };
+            if let Err(e) = progress.send(factory.from(bytes_downloaded)).await {
+                warn!("Progress receiver error: {:?}", e);
+            }
         }
 
         Ok(())
@@ -217,6 +221,10 @@ where
 
 pub trait CreatesFromBytesUploaded<M>: Send + Sync {
     fn from(&self, bytes: BytesUploaded) -> M;
+}
+
+pub trait CreatesFromBytesDownloaded<M>: Send + Sync {
+    fn from(&self, bytes: BytesDownloaded) -> M;
 }
 
 #[derive(Debug)]
@@ -288,7 +296,7 @@ impl AuthenticatedClient {
                     uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_bytes);
 
                     let bytes_uploaded = BytesUploaded { bytes_uploaded: uploaded, total_bytes };
-                    if let Err(e) = progress.send(factory.from( bytes_uploaded)).await {
+                    if let Err(e) = progress.send(factory.from(bytes_uploaded)).await {
                         warn!("Progress receiver error: {:?}", e);
                     }
                 }

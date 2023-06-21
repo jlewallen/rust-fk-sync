@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use query::portal::{LoginPayload, PortalError, Tokens};
+use query::{
+    portal::{CreatesFromBytesDownloaded, LoginPayload, PortalError, Tokens},
+    BytesDownloaded,
+};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -34,6 +37,14 @@ pub struct SyncCommand {
     discover_ip: Option<String>,
 }
 
+struct SimpleProgress {}
+
+impl CreatesFromBytesDownloaded<String> for SimpleProgress {
+    fn from(&self, bytes: BytesDownloaded) -> String {
+        format!("{:?}", bytes)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     fn get_rust_log() -> String {
@@ -63,6 +74,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::QueryPortal) => {
+            let (publish_tx, mut _rx) = mpsc::channel::<String>(1024);
+
             let client = query::portal::Client::new("https://api.fieldkit.org")?;
             let tokens = client
                 .login(LoginPayload {
@@ -78,10 +91,7 @@ async fn main() -> Result<()> {
             let path = PathBuf::from("firmware.bin");
 
             client
-                .download_firmware(firmware, &path, |p| {
-                    info!("{:?}", p);
-                    Ok(())
-                })
+                .download_firmware(firmware, &path, publish_tx.clone(), SimpleProgress {})
                 .await?;
 
             let broken_client = client.to_authenticated(Tokens {
