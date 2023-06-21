@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine};
 use chrono::serde::ts_seconds::deserialize as from_ts;
+use chrono::serde::ts_seconds::serialize as to_ts;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use reqwest::{header::InvalidHeaderValue, header::ToStrError};
 use reqwest::{
@@ -177,7 +178,7 @@ struct Firmwares {
     firmwares: Vec<Firmware>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Firmware {
     pub id: i64,
     #[serde(deserialize_with = "deserialize_firmware_time")]
@@ -189,7 +190,11 @@ pub struct Firmware {
     pub url: String,
     #[serde(rename = "buildNumber")]
     pub build_number: i64,
-    #[serde(rename = "buildTime", deserialize_with = "from_ts")]
+    #[serde(
+        rename = "buildTime",
+        deserialize_with = "from_ts",
+        serialize_with = "to_ts"
+    )]
     pub build_time: DateTime<Utc>,
     pub meta: HashMap<String, String>,
 }
@@ -199,10 +204,15 @@ where
     D: Deserializer<'de>,
 {
     let s: String = Deserialize::deserialize(deserializer)?;
-    NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S.%f +0000")
-        .or_else(|_| NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S.%f +0000 +0000"))
-        .map_err(serde::de::Error::custom)
-        .map(|v| DateTime::from_utc(v, Utc))
+
+    DateTime::parse_from_rfc3339(&s)
+        .map(|v| v.with_timezone(&Utc))
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S.%f +0000")
+                .or_else(|_| NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S.%f +0000 +0000"))
+                .map_err(serde::de::Error::custom)
+                .map(|v| DateTime::from_utc(v, Utc))
+        })
 }
 
 pub trait CreatesFromBytesUploaded<M>: Send + Sync {
