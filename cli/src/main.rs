@@ -1,14 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use query::{
-    portal::{CreatesFromBytesDownloaded, LoginPayload, PortalError, Tokens},
-    BytesDownloaded,
-};
+use query::portal::{LoginPayload, PortalError, Tokens};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{signal, sync::mpsc};
+use tokio::{pin, signal, sync::mpsc};
+use tokio_stream::StreamExt;
 use tracing::*;
 use tracing_subscriber::prelude::*;
 
@@ -35,14 +33,6 @@ pub struct SyncCommand {
     discover_device_id: Option<String>,
     #[arg(long, default_value = None)]
     discover_ip: Option<String>,
-}
-
-struct SimpleProgress {}
-
-impl CreatesFromBytesDownloaded<String> for SimpleProgress {
-    fn from(&self, bytes: BytesDownloaded) -> String {
-        format!("{:?}", bytes)
-    }
 }
 
 #[tokio::main]
@@ -74,8 +64,6 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::QueryPortal) => {
-            let (publish_tx, mut _rx) = mpsc::channel::<String>(1024);
-
             let client = query::portal::Client::new("https://api.fieldkit.org")?;
             let tokens = client
                 .login(LoginPayload {
@@ -90,9 +78,13 @@ async fn main() -> Result<()> {
             let firmware = firmwares.get(0).unwrap();
             let path = PathBuf::from("firmware.bin");
 
-            client
-                .download_firmware(firmware, &path, publish_tx.clone(), SimpleProgress {})
-                .await?;
+            let res = client.download_firmware(firmware, &path).await?;
+
+            pin!(res);
+
+            while let Some(bytes) = res.next().await {
+                info!("{:?}", bytes);
+            }
 
             let broken_client = client.to_authenticated(Tokens {
                 token: "INVALID".to_string(),
@@ -139,7 +131,6 @@ async fn main() -> Result<()> {
             let (tx, mut rx) = mpsc::channel::<Discovered>(32);
 
             let ignore = tokio::spawn({
-                // let server = server.clone();
                 async move {
                     while let Some(d) = transfer_events.recv().await {
                         trace!("{:?}", d);

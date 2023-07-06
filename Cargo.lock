@@ -283,6 +283,7 @@ dependencies = [
  "socket2",
  "sync",
  "tokio",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "varint",
@@ -1582,6 +1583,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

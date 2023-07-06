@@ -19,7 +19,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::fs::File;
-use tokio::sync::mpsc::Sender;
+use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
@@ -136,16 +136,11 @@ impl Client {
         Ok(firmwares.firmwares)
     }
 
-    pub async fn download_firmware<M>(
+    pub async fn download_firmware(
         &self,
         firmware: &Firmware,
         path: &Path,
-        progress: Sender<M>,
-        factory: impl CreatesFromBytesDownloaded<M> + 'static,
-    ) -> Result<(), PortalError>
-    where
-        M: std::fmt::Debug + Send + Sync + 'static,
-    {
+    ) -> Result<impl Stream<Item = Result<BytesDownloaded>>, PortalError> {
         let response = reqwest::get(&format!("{}{}", self.base_url, firmware.url)).await?;
         let total_bytes = response
             .content_length()
@@ -155,21 +150,18 @@ impl Client {
         let mut stream = response.bytes_stream();
         let mut downloaded: u64 = 0;
 
-        while let Some(item) = stream.next().await {
-            let chunk = item.or_else(|_| Err(anyhow!("Error while downloading firmware")))?;
-            file.write_all(&chunk)?;
+        Ok(async_stream::try_stream! {
+            while let Some(item) = stream.next().await {
+                let chunk = item.or_else(|_| Err(anyhow!("Error while downloading firmware")))?;
+                file.write_all(&chunk)?;
 
-            downloaded = std::cmp::min(downloaded + (chunk.len() as u64), total_bytes);
-            let bytes_downloaded = BytesDownloaded {
-                bytes_downloaded: downloaded,
-                total_bytes,
-            };
-            if let Err(e) = progress.send(factory.from(bytes_downloaded)).await {
-                warn!("Progress receiver error: {:?}", e);
+                downloaded = std::cmp::min(downloaded + (chunk.len() as u64), total_bytes);
+                yield BytesDownloaded {
+                    bytes_downloaded: downloaded,
+                    total_bytes,
+                };
             }
-        }
-
-        Ok(())
+        })
     }
 
     pub fn to_authenticated(&self, token: Tokens) -> Result<AuthenticatedClient, PortalError> {
@@ -219,14 +211,6 @@ where
         })
 }
 
-pub trait CreatesFromBytesUploaded<M>: Send + Sync {
-    fn from(&self, bytes: BytesUploaded) -> M;
-}
-
-pub trait CreatesFromBytesDownloaded<M>: Send + Sync {
-    fn from(&self, bytes: BytesDownloaded) -> M;
-}
-
 #[derive(Debug)]
 pub struct AuthenticatedClient {
     tokens: Tokens,
@@ -256,15 +240,10 @@ impl AuthenticatedClient {
         Ok(response.json().await?)
     }
 
-    pub async fn upload_readings<M>(
+    pub async fn upload_readings(
         &self,
         path: &Path,
-        progress: Sender<M>,
-        factory: impl CreatesFromBytesUploaded<M> + 'static,
-    ) -> Result<(), PortalError>
-    where
-        M: std::fmt::Debug + Send + Sync + 'static,
-    {
+    ) -> Result<impl Stream<Item = BytesUploaded>, PortalError> {
         let json_path = PathBuf::from(format!("{}.json", path.display()));
         let file_meta = FileMeta::load_from_json(&json_path).await?;
 
@@ -287,42 +266,55 @@ impl AuthenticatedClient {
         let md = file.metadata().await?;
         let total_bytes = md.len();
 
+        let (sender, recv) = tokio::sync::mpsc::unbounded_channel::<BytesUploaded>();
+
         let mut uploaded = 0;
-
         let mut reader_stream = ReaderStream::new(file);
-        let async_stream = async_stream::stream! {
-            while let Some(chunk) = reader_stream.next().await {
-                if let Ok(chunk) = &chunk {
-                    uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_bytes);
 
-                    let bytes_uploaded = BytesUploaded { bytes_uploaded: uploaded, total_bytes };
-                    if let Err(e) = progress.send(factory.from(bytes_uploaded)).await {
-                        warn!("Progress receiver error: {:?}", e);
+        tokio::spawn({
+            let url = format!("{}{}", self.plain.base_url, "/ingestion");
+            let token = self.tokens.token.clone();
+
+            let async_stream = async_stream::stream! {
+                while let Some(chunk) = reader_stream.next().await {
+                    if let Ok(chunk) = &chunk {
+                        uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_bytes);
+                        match sender.send(BytesUploaded { bytes_uploaded: uploaded, total_bytes }) {
+                            Err(e) => warn!("{:?}", e),
+                            Ok(_) => {},
+                        }
                     }
+                    yield chunk;
                 }
-                yield chunk;
+            };
+
+            async move {
+                info!(%url, "uploading {} bytes", total_bytes);
+
+                let response = reqwest::Client::new()
+                    .post(&url)
+                    .headers(header_map)
+                    .header("content-type", "application/octet-stream")
+                    .header("content-length", format!("{}", total_bytes))
+                    .header("authorization", token)
+                    .body(reqwest::Body::wrap_stream(async_stream))
+                    .send()
+                    .await;
+
+                match response {
+                    Ok(response) => {
+                        info!("done {:?}", response.status());
+                    }
+                    Err(e) => warn!("{:?}", e),
+                }
             }
-        };
+        });
 
-        let url = format!("{}{}", self.plain.base_url, "/ingestion");
+        Ok(tokio_stream::wrappers::UnboundedReceiverStream::new(recv))
+    }
 
-        info!(%url, "uploading {} bytes", total_bytes);
-
-        let response = reqwest::Client::new()
-            .post(&url)
-            .headers(header_map)
-            .header("content-type", "application/octet-stream")
-            .header("content-length", format!("{}", total_bytes))
-            .header("authorization", self.tokens.token.clone())
-            .body(reqwest::Body::wrap_stream(async_stream))
-            .send()
-            .await?;
-
-        let body: serde_json::Value = response.json().await?;
-
-        info!("{:?}", body);
-
-        Ok(())
+    pub async fn available_firmware(&self) -> Result<Vec<Firmware>> {
+        self.plain.available_firmware().await
     }
 }
 

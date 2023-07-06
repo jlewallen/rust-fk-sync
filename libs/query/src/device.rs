@@ -6,14 +6,12 @@ use std::io::Cursor;
 use std::path::Path;
 use std::time::Duration;
 use tokio::fs::File;
-use tokio::sync::mpsc::Sender;
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 use tokio_util::io::ReaderStream;
 use tracing::*;
 
 pub use protos::http::*;
 
-use crate::portal::CreatesFromBytesUploaded;
 use crate::BytesUploaded;
 
 pub struct Client {
@@ -76,57 +74,59 @@ impl Client {
         self.execute(req).await
     }
 
-    pub async fn upgrade<M>(
+    pub async fn upgrade(
         &self,
         addr: &str,
         path: &Path,
         swap: bool,
-        progress: Sender<M>,
-        factory: impl CreatesFromBytesUploaded<M> + 'static,
-    ) -> Result<()>
-    where
-        M: std::fmt::Debug + Send + Sync + 'static,
-    {
+    ) -> Result<impl Stream<Item = BytesUploaded>> {
         let file = File::open(path).await?;
         let md = file.metadata().await?;
         let total_bytes = md.len();
 
-        let mut uploaded = 0;
+        let (sender, recv) = tokio::sync::mpsc::unbounded_channel::<BytesUploaded>();
 
+        let mut uploaded = 0;
         let mut reader_stream = ReaderStream::new(file);
 
-        let async_stream = async_stream::stream! {
-            while let Some(chunk) = reader_stream.next().await {
-                if let Ok(chunk) = &chunk {
-                    uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_bytes);
+        tokio::spawn({
+            let url = format!("http://{}/fk/v1/upload/firmware", addr);
+            let url = if swap { format!("{}?swap=1", url) } else { url };
 
-                    let bytes_uploaded = BytesUploaded { bytes_uploaded: uploaded, total_bytes };
-                    if let Err(e) = progress.send(factory.from(bytes_uploaded)).await {
-                        warn!("Progress receiver error: {:?}", e);
+            let async_stream = async_stream::stream! {
+                while let Some(chunk) = reader_stream.next().await {
+                    if let Ok(chunk) = &chunk {
+                        uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_bytes);
+                        match sender.send(BytesUploaded { bytes_uploaded: uploaded, total_bytes }) {
+                            Err(e) => warn!("{:?}", e),
+                            Ok(_) => {},
+                        }
                     }
+
+                    yield chunk;
                 }
+            };
 
-                yield chunk;
+            async move {
+                info!(%url, "uploading {} bytes", total_bytes);
+
+                let response = reqwest::Client::new()
+                    .post(&url)
+                    .header("content-length", format!("{}", total_bytes))
+                    .body(reqwest::Body::wrap_stream(async_stream))
+                    .send()
+                    .await;
+
+                match response {
+                    Ok(response) => {
+                        info!("done {:?}", response.status());
+                    }
+                    Err(e) => warn!("{:?}", e),
+                }
             }
-        };
+        });
 
-        let url = format!("http://{}/fk/v1/upload/firmware", addr);
-        let url = if swap { format!("{}?swap=1", url) } else { url };
-
-        info!(%url, "uploading {} bytes", total_bytes);
-
-        let response = reqwest::Client::new()
-            .post(&url)
-            .header("content-length", format!("{}", total_bytes))
-            .body(reqwest::Body::wrap_stream(async_stream))
-            .send()
-            .await?;
-
-        let body: serde_json::Value = response.json().await?;
-
-        info!("{:?}", body);
-
-        Ok(())
+        Ok(tokio_stream::wrappers::UnboundedReceiverStream::new(recv))
     }
 
     async fn execute<T: Message + Default>(&self, req: reqwest::Request) -> Result<T> {
