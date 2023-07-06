@@ -27,7 +27,7 @@ pub struct Station {
     pub device_id: DeviceId,
     pub generation_id: String,
     pub name: String,
-    pub firmware: String,
+    pub firmware: Firmware,
     pub last_seen: DateTime<Utc>,
     pub status: Option<Vec<u8>>,
     pub meta: Stream,
@@ -35,6 +35,12 @@ pub struct Station {
     pub battery: Battery,
     pub solar: Solar,
     pub modules: Vec<Module>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Firmware {
+    pub label: String,
+    pub time: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -145,7 +151,10 @@ pub(crate) mod test {
                 device_id: DeviceId("device-id".to_owned()),
                 generation_id: "generation-id".to_owned(),
                 name: "Hoppy Kangaroo".to_owned(),
-                firmware: "00aabbccddeeffgg".to_owned(),
+                firmware: Firmware {
+                    label: "00aabbccddeeffgg".to_owned(),
+                    time: 1688659549,
+                },
                 last_seen: Utc::now(),
                 status: None,
                 meta: Stream::default(),

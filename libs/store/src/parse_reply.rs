@@ -11,6 +11,8 @@ pub enum ReplyMappingError {
     NoStatus,
     #[error("No identity")]
     NoIdentity,
+    #[error("No firmware")]
+    NoFirmware,
     #[error("No module header")]
     NoModuleHeader,
     #[error("No sensor")]
@@ -28,6 +30,7 @@ pub enum ReplyMappingError {
 pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingError> {
     let status = reply.status.ok_or(ReplyMappingError::NoStatus)?;
     let identity = status.identity.ok_or(ReplyMappingError::NoIdentity)?;
+    let firmware = status.firmware.ok_or(ReplyMappingError::NoFirmware)?;
     let streams: Vec<Stream> = reply
         .streams
         .iter()
@@ -59,7 +62,10 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
         device_id,
         generation_id,
         name: identity.name.to_owned(),
-        firmware: identity.firmware.to_owned(),
+        firmware: Firmware {
+            label: firmware.version.to_owned(),
+            time: firmware.timestamp as i64,
+        },
         last_seen: Utc::now(),
         meta: streams
             .get(1)

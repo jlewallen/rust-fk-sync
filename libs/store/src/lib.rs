@@ -130,8 +130,9 @@ impl Db {
         let mut stmt = conn.prepare(
             r#"
             INSERT INTO station
-            (device_id, generation_id, name, firmware, last_seen, meta_size, meta_records, data_size, data_records, battery_percentage, battery_voltage, solar_voltage, status) VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (device_id, generation_id, name, firmware_label, firmware_time, last_seen,
+             meta_size, meta_records, data_size, data_records, battery_percentage, battery_voltage, solar_voltage, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )?;
 
@@ -139,7 +140,8 @@ impl Db {
             station.device_id.0,
             station.generation_id,
             station.name,
-            station.firmware,
+            station.firmware.label,
+            station.firmware.time,
             station.last_seen.to_rfc3339(),
             station.meta.size,
             station.meta.records,
@@ -176,7 +178,7 @@ impl Db {
         let mut stmt = conn.prepare(
             r#"
             UPDATE station SET
-                generation_id = ?, name = ?, firmware = ?, last_seen = ?, meta_size = ?, meta_records = ?, data_size = ?, data_records = ?,
+                generation_id = ?, name = ?, firmware_label = ?, firmware_time = ?, last_seen = ?, meta_size = ?, meta_records = ?, data_size = ?, data_records = ?,
                 battery_percentage = ?, battery_voltage = ?, solar_voltage = ?, status = ?
             WHERE id = ?"#,
         )?;
@@ -184,7 +186,8 @@ impl Db {
         let affected = stmt.execute(params![
             station.generation_id,
             station.name,
-            station.firmware,
+            station.firmware.label,
+            station.firmware.time,
             station.last_seen.to_rfc3339(),
             station.meta.size,
             station.meta.records,
@@ -203,7 +206,7 @@ impl Db {
     }
 
     fn row_to_station(&self, row: &rusqlite::Row) -> Result<Station, rusqlite::Error> {
-        let last_seen: String = row.get(5)?;
+        let last_seen: String = row.get(6)?;
         let last_seen = DateTime::parse_from_rfc3339(&last_seen)
             .expect("Parsing last_seen")
             .with_timezone(&Utc);
@@ -213,31 +216,34 @@ impl Db {
             device_id: DeviceId(row.get(1)?),
             generation_id: row.get(2)?,
             name: row.get(3)?,
-            firmware: row.get(4)?,
+            firmware: Firmware {
+                label: row.get(4)?,
+                time: row.get(5)?,
+            },
             last_seen,
             meta: Stream {
-                size: row.get(6)?,
-                records: row.get(7)?,
+                size: row.get(7)?,
+                records: row.get(8)?,
             },
             data: Stream {
-                size: row.get(8)?,
-                records: row.get(9)?,
+                size: row.get(9)?,
+                records: row.get(10)?,
             },
             battery: Battery {
-                percentage: row.get(10)?,
-                voltage: row.get(11)?,
-            },
-            solar: Solar {
+                percentage: row.get(11)?,
                 voltage: row.get(12)?,
             },
-            status: row.get(13)?,
+            solar: Solar {
+                voltage: row.get(13)?,
+            },
+            status: row.get(14)?,
             modules: Vec::new(),
         })
     }
 
     pub fn get_stations(&self) -> Result<Vec<Station>> {
         let mut stmt = self.require_opened()?.prepare(
-            r#"SELECT id, device_id, generation_id, name, firmware, last_seen,
+            r#"SELECT id, device_id, generation_id, name, firmware_label, firmware_time, last_seen,
                meta_size, meta_records, data_size, data_records,
                battery_percentage, battery_voltage, solar_voltage, status
                FROM station"#,
@@ -250,7 +256,7 @@ impl Db {
 
     pub fn get_station_by_device_id(&self, device_id: &DeviceId) -> Result<Option<Station>> {
         let mut stmt = self.require_opened()?.prepare(
-            r#"SELECT id, device_id, generation_id, name, firmware, last_seen,
+            r#"SELECT id, device_id, generation_id, name, firmware_label, firmware_time, last_seen,
                meta_size, meta_records, data_size, data_records,
                battery_percentage, battery_voltage, solar_voltage, status
                FROM station WHERE device_id = ?"#,
