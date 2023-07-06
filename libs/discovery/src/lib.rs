@@ -113,10 +113,10 @@ impl Announce {
             if tag >> 3 == PORT_TAG {
                 reader.read_int32(bytes)?
             } else {
-                0
+                80
             }
         } else {
-            0
+            80
         };
 
         if reader.is_eof() {
