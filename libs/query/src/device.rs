@@ -5,6 +5,7 @@ use reqwest::RequestBuilder;
 use std::io::Cursor;
 use std::path::Path;
 use std::time::Duration;
+use thiserror::Error;
 use tokio::fs::File;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::io::ReaderStream;
@@ -16,6 +17,12 @@ use crate::BytesUploaded;
 
 pub struct Client {
     client: reqwest::Client,
+}
+
+#[derive(Debug, Error)]
+pub enum UpgradeError {
+    #[error("Server error")]
+    ServerError,
 }
 
 impl Client {
@@ -79,12 +86,13 @@ impl Client {
         addr: &str,
         path: &Path,
         swap: bool,
-    ) -> Result<impl Stream<Item = BytesUploaded>> {
+    ) -> Result<impl Stream<Item = Result<BytesUploaded, UpgradeError>>> {
         let file = File::open(path).await?;
         let md = file.metadata().await?;
         let total_bytes = md.len();
 
-        let (sender, recv) = tokio::sync::mpsc::unbounded_channel::<BytesUploaded>();
+        let (sender, recv) =
+            tokio::sync::mpsc::unbounded_channel::<Result<BytesUploaded, UpgradeError>>();
 
         let mut uploaded = 0;
         let mut reader_stream = ReaderStream::new(file);
@@ -93,11 +101,12 @@ impl Client {
             let url = format!("http://{}/fk/v1/upload/firmware", addr);
             let url = if swap { format!("{}?swap=1", url) } else { url };
 
+            let copying = sender.clone();
             let async_stream = async_stream::stream! {
                 while let Some(chunk) = reader_stream.next().await {
                     if let Ok(chunk) = &chunk {
                         uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_bytes);
-                        match sender.send(BytesUploaded { bytes_uploaded: uploaded, total_bytes }) {
+                        match copying.send(Ok(BytesUploaded { bytes_uploaded: uploaded, total_bytes })) {
                             Err(e) => warn!("{:?}", e),
                             Ok(_) => {},
                         }
@@ -120,6 +129,12 @@ impl Client {
                 match response {
                     Ok(response) => {
                         info!("done {:?}", response.status());
+                        if response.status().is_server_error() {
+                            match sender.send(Err(UpgradeError::ServerError)) {
+                                Err(e) => warn!("{:?}", e),
+                                Ok(_) => {}
+                            }
+                        }
                     }
                     Err(e) => warn!("{:?}", e),
                 }

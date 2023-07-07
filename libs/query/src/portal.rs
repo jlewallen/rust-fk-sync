@@ -140,7 +140,7 @@ impl Client {
         &self,
         firmware: &Firmware,
         path: &Path,
-    ) -> Result<impl Stream<Item = Result<BytesDownloaded>>, PortalError> {
+    ) -> Result<impl Stream<Item = Result<BytesDownloaded, PortalError>>, PortalError> {
         let response = reqwest::get(&format!("{}{}", self.base_url, firmware.url)).await?;
         let total_bytes = response
             .content_length()
@@ -243,7 +243,7 @@ impl AuthenticatedClient {
     pub async fn upload_readings(
         &self,
         path: &Path,
-    ) -> Result<impl Stream<Item = BytesUploaded>, PortalError> {
+    ) -> Result<impl Stream<Item = Result<BytesUploaded, PortalError>>, PortalError> {
         let json_path = PathBuf::from(format!("{}.json", path.display()));
         let file_meta = FileMeta::load_from_json(&json_path).await?;
 
@@ -266,7 +266,8 @@ impl AuthenticatedClient {
         let md = file.metadata().await?;
         let total_bytes = md.len();
 
-        let (sender, recv) = tokio::sync::mpsc::unbounded_channel::<BytesUploaded>();
+        let (sender, recv) =
+            tokio::sync::mpsc::unbounded_channel::<Result<BytesUploaded, PortalError>>();
 
         let mut uploaded = 0;
         let mut reader_stream = ReaderStream::new(file);
@@ -274,12 +275,13 @@ impl AuthenticatedClient {
         tokio::spawn({
             let url = format!("{}{}", self.plain.base_url, "/ingestion");
             let token = self.tokens.token.clone();
+            let copying = sender.clone();
 
             let async_stream = async_stream::stream! {
                 while let Some(chunk) = reader_stream.next().await {
                     if let Ok(chunk) = &chunk {
                         uploaded = std::cmp::min(uploaded + (chunk.len() as u64), total_bytes);
-                        match sender.send(BytesUploaded { bytes_uploaded: uploaded, total_bytes }) {
+                        match copying.send(Ok(BytesUploaded { bytes_uploaded: uploaded, total_bytes })) {
                             Err(e) => warn!("{:?}", e),
                             Ok(_) => {},
                         }
@@ -304,6 +306,12 @@ impl AuthenticatedClient {
                 match response {
                     Ok(response) => {
                         info!("done {:?}", response.status());
+                        if response.status().is_server_error() {
+                            match sender.send(Err(PortalError::HttpStatus(response.status()))) {
+                                Err(e) => warn!("{:?}", e),
+                                Ok(_) => {}
+                            }
+                        }
                     }
                     Err(e) => warn!("{:?}", e),
                 }
