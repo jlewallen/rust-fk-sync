@@ -109,6 +109,8 @@ pub struct NetworkSettings {
     pub mac_address: ::prost::alloc::string::String,
     #[prost(bool, tag = "5")]
     pub modifying: bool,
+    #[prost(bool, tag = "6")]
+    pub supports_udp: bool,
     #[prost(message, repeated, tag = "2")]
     pub networks: ::prost::alloc::vec::Vec<NetworkInfo>,
 }
