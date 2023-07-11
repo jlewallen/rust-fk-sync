@@ -1,4 +1,5 @@
 use anyhow::Result;
+use nonzero_ext::nonzero;
 use prost::Message;
 use reqwest::header::HeaderMap;
 use reqwest::RequestBuilder;
@@ -94,6 +95,10 @@ impl Client {
         let (sender, recv) =
             tokio::sync::mpsc::unbounded_channel::<Result<BytesUploaded, UpgradeError>>();
 
+        use governor::{Quota, RateLimiter};
+        let quota = Quota::per_second(nonzero!(5u32));
+        let lim = RateLimiter::direct(quota);
+
         let mut uploaded = 0;
         let mut reader_stream = ReaderStream::new(file);
 
@@ -111,6 +116,8 @@ impl Client {
                             Ok(_) => {},
                         }
                     }
+
+                    lim.until_ready().await;
 
                     yield chunk;
                 }
