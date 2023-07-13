@@ -17,6 +17,7 @@ pub struct FileMeta {
     pub device_id: String,
     pub head: i64,
     pub tail: i64,
+    pub data_name: String,
     pub headers: HashMap<String, String>,
 }
 

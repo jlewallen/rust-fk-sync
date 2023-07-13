@@ -148,7 +148,8 @@ impl FilesRecordSink {
         total_records: i64,
     ) -> Result<()> {
         let device_path = self.device_path(&identity.device_id);
-        let path = device_path.join(format!("{}.fkpb.json", sync_id));
+        let data_name = format!("{}.fkpb", sync_id);
+        let path = device_path.join(format!("{}.json", &data_name));
 
         let writing = OpenOptions::new()
             .write(true)
@@ -171,6 +172,7 @@ impl FilesRecordSink {
             device_id: identity.device_id.clone().into(),
             head: 0,
             tail: total_records - 1,
+            data_name,
             headers,
         };
 

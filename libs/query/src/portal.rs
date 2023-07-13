@@ -13,10 +13,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::Write;
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::PathBuf;
+use std::{path::Path, time::Duration};
 use thiserror::Error;
 use tokio::fs::File;
 use tokio_stream::Stream;
@@ -244,8 +242,9 @@ impl AuthenticatedClient {
         &self,
         path: &Path,
     ) -> Result<impl Stream<Item = Result<BytesUploaded, PortalError>>, PortalError> {
-        let json_path = PathBuf::from(format!("{}.json", path.display()));
-        let file_meta = FileMeta::load_from_json(&json_path).await?;
+        let file_meta = FileMeta::load_from_json(&path).await?;
+        let data_path =
+            get_relative_to(path, &file_meta.data_name).ok_or(PortalError::UnexpectedError)?;
 
         let header_map: HeaderMap = file_meta
             .headers
@@ -262,7 +261,7 @@ impl AuthenticatedClient {
 
         info!("headers {:?}", &header_map);
 
-        let file = File::open(path).await?;
+        let file = File::open(&data_path).await?;
         let md = file.metadata().await?;
         let total_bytes = md.len();
 
@@ -324,6 +323,11 @@ impl AuthenticatedClient {
     pub async fn available_firmware(&self) -> Result<Vec<Firmware>> {
         self.plain.available_firmware().await
     }
+}
+
+fn get_relative_to(anchor: &Path, relative: &str) -> Option<PathBuf> {
+    let base = anchor.parent();
+    base.map(|b| b.join(relative))
 }
 
 #[derive(Clone)]
