@@ -201,6 +201,7 @@ pub enum Message {
     },
     Batch {
         flags: u32,
+        errors: u32,
     },
 }
 
@@ -275,9 +276,10 @@ impl Message {
                 }
                 Ok(())
             }
-            Message::Batch { flags } => {
+            Message::Batch { flags, errors } => {
                 writer.write_fixed32(FK_UDP_PROTOCOL_KIND_BATCH)?;
                 writer.write_fixed32(*flags)?;
+                writer.write_fixed32(*errors as u32)?;
                 Ok(())
             }
         }
@@ -333,8 +335,9 @@ impl Message {
             }
             FK_UDP_PROTOCOL_KIND_BATCH => {
                 let flags = reader.read_fixed32(bytes)?;
+                let errors = reader.read_fixed32(bytes)?;
 
-                Ok((Self::Batch { flags }, None))
+                Ok((Self::Batch { flags, errors }, None))
             }
             _ => todo!(),
         }
@@ -498,7 +501,10 @@ mod tests {
 
     #[test]
     pub fn test_serialization_batch() -> Result<()> {
-        let message = Message::Batch { flags: 0xff };
+        let message = Message::Batch {
+            flags: 0xff,
+            errors: 0xff,
+        };
         let mut buffer = Vec::new();
         message.write(&mut buffer)?;
 
@@ -506,7 +512,10 @@ mod tests {
 
         assert_eq!(
             codec.try_read(&buffer)?,
-            Some(Message::Batch { flags: 0xff })
+            Some(Message::Batch {
+                flags: 0xff,
+                errors: 0xff
+            })
         );
 
         Ok(())

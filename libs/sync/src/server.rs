@@ -259,7 +259,10 @@ impl ConnectedDevice {
                     _ => Ok(Transition::None),
                 }
             }
-            Message::Batch { flags: _flags } => self.query_requires(),
+            Message::Batch {
+                flags: _flags,
+                errors: _errors,
+            } => self.query_requires(),
             _ => Ok(Transition::None),
         }
     }

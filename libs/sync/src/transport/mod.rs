@@ -69,8 +69,16 @@ impl ReceiveTransport for OpenUdp {
 
                     match codec.try_read(&buffer[..len])? {
                         Some(message) => {
-                            if let Message::Batch { flags: _flags } = message {
-                                info!("{:?} Batch", addr,)
+                            if let Message::Batch {
+                                flags: _flags,
+                                errors,
+                            } = message
+                            {
+                                if errors > 0 {
+                                    warn!("{:?} Batch ({:?} Errors)", addr, errors)
+                                } else {
+                                    info!("{:?} Batch", addr)
+                                }
                             }
 
                             batch.push(TransportMessage((addr, message)));
