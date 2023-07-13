@@ -18,6 +18,7 @@ anyhow = "1.0.66"
 async-trait = "0.1.68"
 backoff = { version = "0.4.0", features = ["tokio"] }
 chrono = "0.4.26"
+glob = "0.3.1"
 hex = "0.4.3"
 itertools = "0.10.5"
 lazy_static = "1.4.0"

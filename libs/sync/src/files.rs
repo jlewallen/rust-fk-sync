@@ -13,6 +13,7 @@ use tracing::*;
 
 use crate::{
     proto::{Identity, ReceivedRecords, Record},
+    server::RecordSinkArchive,
     RecordsSink,
 };
 use discovery::DeviceId;
@@ -140,7 +141,7 @@ impl FilesRecordSink {
         Ok(written)
     }
 
-    fn write_identity(
+    fn write_file_meta(
         &self,
         sync_id: &String,
         identity: &Identity,
@@ -165,7 +166,13 @@ impl FilesRecordSink {
         );
         headers.insert("Fk-Type".to_owned(), "data".to_owned());
 
-        let fm = FileMeta { headers };
+        let fm = FileMeta {
+            sync_id: sync_id.clone(),
+            device_id: identity.device_id.clone().into(),
+            head: 0,
+            tail: total_records - 1,
+            headers,
+        };
 
         serde_json::to_writer(writing, &fm)?;
 
@@ -201,6 +208,33 @@ impl RecordsFile {
 }
 
 impl RecordsSink for FilesRecordSink {
+    fn query_archives(&self) -> Result<Vec<RecordSinkArchive>> {
+        let pattern = self.base_path.join("*/*.json");
+        let pattern = pattern.to_string_lossy();
+        info!("Pattern: {:?}", &pattern);
+
+        let found_metas = glob::glob(&pattern)?;
+        let parsed = found_metas
+            .into_iter()
+            .map(|p| Ok(p?))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|p| Ok((p.clone(), FileMeta::load_from_json_sync(&p)?)))
+            .collect::<Result<Vec<_>>>()?;
+        info!("Parsed {:?}", parsed);
+
+        let archives = parsed
+            .into_iter()
+            .map(|(path, meta)| RecordSinkArchive {
+                device_id: meta.device_id.clone(),
+                path: path.to_string_lossy().to_string(),
+                meta,
+            })
+            .collect();
+
+        Ok(archives)
+    }
+
     fn write(&self, records: &ReceivedRecords) -> Result<()> {
         let range = records
             .range()
@@ -248,7 +282,7 @@ impl RecordsSink for FilesRecordSink {
 
         let total_records = self.join_files(&sync_id, &identity, files)?;
 
-        self.write_identity(&sync_id, &identity, total_records)?;
+        self.write_file_meta(&sync_id, &identity, total_records)?;
 
         Ok(())
     }

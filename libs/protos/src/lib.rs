@@ -13,6 +13,10 @@ pub mod http {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FileMeta {
+    pub sync_id: String,
+    pub device_id: String,
+    pub head: i64,
+    pub tail: i64,
     pub headers: HashMap<String, String>,
 }
 
@@ -21,6 +25,14 @@ impl FileMeta {
         let mut file = File::open(path).await?;
         let mut string = String::new();
         file.read_to_string(&mut string).await?;
+        Ok(serde_json::from_str(&string)?)
+    }
+
+    pub fn load_from_json_sync(path: &Path) -> Result<Self> {
+        use std::io::prelude::*;
+        let mut file = std::fs::File::open(path)?;
+        let mut string = String::new();
+        file.read_to_string(&mut string)?;
         Ok(serde_json::from_str(&string)?)
     }
 }

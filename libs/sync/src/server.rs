@@ -21,7 +21,7 @@ use crate::{
     progress::{Progress, RangeProgress},
     proto::{Identity, Message, ReceivedRecords, RecordRange},
     transport::{ReceiveTransport, SendTransport},
-    Transport, TransportMessage,
+    FileMeta, Transport, TransportMessage,
 };
 
 const STALLED_EXPECTING_MILLIS: u64 = 5000;
@@ -34,7 +34,15 @@ pub enum SinkMessage {
     Flush(String, Identity),
 }
 
+#[derive(Debug)]
+pub struct RecordSinkArchive {
+    pub device_id: String,
+    pub path: String,
+    pub meta: FileMeta,
+}
+
 pub trait RecordsSink: Send + Sync {
+    fn query_archives(&self) -> Result<Vec<RecordSinkArchive>>;
     fn write(&self, records: &ReceivedRecords) -> Result<()>;
     fn flush(&self, sync_id: String, identity: Identity) -> Result<()>;
 }
@@ -43,6 +51,10 @@ pub trait RecordsSink: Send + Sync {
 pub struct DevNullSink {}
 
 impl RecordsSink for DevNullSink {
+    fn query_archives(&self) -> Result<Vec<RecordSinkArchive>> {
+        Ok(Vec::new())
+    }
+
     fn write(&self, _records: &ReceivedRecords) -> Result<()> {
         Ok(())
     }
@@ -59,6 +71,7 @@ pub enum ServerEvent {
     Processing(DeviceId),
     Completed(DeviceId),
     Failed(DeviceId),
+    Available(Vec<RecordSinkArchive>),
 }
 
 #[derive(Debug)]
@@ -520,13 +533,25 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
         self.send(ServerCommand::Cancel(device_id)).await
     }
 
+    pub async fn check_for_archives(&self, publish: Sender<ServerEvent>) -> Result<()> {
+        let sink = self.records_sink.lock().await;
+        let archives = sink.query_archives()?;
+
+        publish.send(ServerEvent::Available(archives)).await?;
+
+        Ok(())
+    }
+
     pub async fn run(&self, publish: Sender<ServerEvent>) -> Result<()> {
         let (tx, mut rx) = mpsc::channel::<Vec<ServerCommand>>(1024);
         let (sink_tx, mut sink_rx) = mpsc::channel::<SinkMessage>(1024);
         let (send, receive) = self.transport.open().await?;
 
+        self.check_for_archives(publish.clone()).await?;
+
         let drain_sink = tokio::spawn({
             let tx = tx.clone();
+            let publish = publish.clone();
             let records_sink = Arc::clone(&self.records_sink);
             async move {
                 while let Some(message) = sink_rx.recv().await {
@@ -539,10 +564,21 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
                         SinkMessage::Flush(sync_id, identity) => {
                             info!("flushing");
                             match sink.flush(sync_id, identity) {
-                                Err(e) => warn!("Send Flushed error: {:?}", e),
+                                Err(e) => warn!("Flush error: {:?}", e),
                                 Ok(_) => match tx.send(vec![ServerCommand::Flushed]).await {
                                     Err(e) => warn!("Send Flushed error: {:?}", e),
-                                    Ok(_) => {}
+                                    Ok(_) => match sink.query_archives() {
+                                        Ok(archives) => {
+                                            match publish
+                                                .send(ServerEvent::Available(archives))
+                                                .await
+                                            {
+                                                Err(e) => warn!("Publish error: {:?}", e),
+                                                Ok(_) => {}
+                                            }
+                                        }
+                                        Err(e) => warn!("Query archives error: {:?}", e),
+                                    },
                                 },
                             }
                         }
