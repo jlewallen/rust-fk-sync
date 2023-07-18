@@ -47,10 +47,29 @@ pub struct LoggedReading {
 pub struct SensorAndValue {
     #[prost(uint32, tag = "1")]
     pub sensor: u32,
-    #[prost(float, tag = "2")]
-    pub value: f32,
-    #[prost(float, tag = "3")]
-    pub uncalibrated: f32,
+    #[prost(oneof = "sensor_and_value::Calibrated", tags = "4, 2")]
+    pub calibrated: ::core::option::Option<sensor_and_value::Calibrated>,
+    #[prost(oneof = "sensor_and_value::Uncalibrated", tags = "5, 3")]
+    pub uncalibrated: ::core::option::Option<sensor_and_value::Uncalibrated>,
+}
+/// Nested message and enum types in `SensorAndValue`.
+pub mod sensor_and_value {
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Calibrated {
+        #[prost(bool, tag = "4")]
+        CalibratedNull(bool),
+        #[prost(float, tag = "2")]
+        CalibratedValue(f32),
+    }
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Uncalibrated {
+        #[prost(bool, tag = "5")]
+        UncalibratedNull(bool),
+        #[prost(float, tag = "3")]
+        UncalibratedValue(f32),
+    }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
