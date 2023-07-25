@@ -3,9 +3,9 @@ use nonzero_ext::nonzero;
 use prost::Message;
 use reqwest::header::HeaderMap;
 use reqwest::RequestBuilder;
-use std::io::Cursor;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
+use std::{io::Cursor, time::SystemTime};
 use thiserror::Error;
 use tokio::fs::File;
 use tokio_stream::{Stream, StreamExt};
@@ -33,6 +33,11 @@ pub struct ConfigureWifiTransmission {
     pub url: Option<String>,
 }
 
+fn unix_time() -> Option<u64> {
+    let start = SystemTime::now();
+    start.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).ok()
+}
+
 impl Client {
     pub fn new() -> Result<Self> {
         let mut headers = HeaderMap::new();
@@ -56,6 +61,7 @@ impl Client {
     pub async fn query_readings(&self, addr: &str) -> Result<HttpReply> {
         let mut query = HttpQuery::default();
         query.r#type = QueryType::QueryGetReadings as i32;
+        query.time = unix_time().unwrap_or(0);
         let encoded = query.encode_length_delimited_to_vec();
         let req = self.new_request(addr)?.body(encoded).build()?;
         self.execute(req).await
