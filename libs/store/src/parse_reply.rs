@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use thiserror::Error;
+use tracing::warn;
 
 use crate::model::*;
 use query::device::HttpReply;
@@ -27,6 +28,14 @@ pub enum ReplyMappingError {
     NoSolar,
 }
 
+fn time_from_u64_seconds(time: u64) -> Option<DateTime<Utc>> {
+    if time > 0 {
+        Utc.timestamp_millis_opt(time as i64 * 1000).earliest()
+    } else {
+        None
+    }
+}
+
 pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingError> {
     let status = reply.status.ok_or(ReplyMappingError::NoStatus)?;
     let identity = status.identity.ok_or(ReplyMappingError::NoIdentity)?;
@@ -46,12 +55,19 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
     let device_id = DeviceId(hex::encode(identity.device_id));
     let generation_id = hex::encode(identity.generation_id);
 
+    let status_time = time_from_u64_seconds(status.time);
+    if status_time.is_none() {
+        warn!("http reply missing status time");
+    }
+
     let modules = reply
         .live_readings
         .iter()
         .flat_map(|r| {
             r.modules.iter().map(|m| {
-                let time = Utc.timestamp_millis_opt(r.time as i64 * 1000).unwrap();
+                let time = time_from_u64_seconds(r.time)
+                    .or(status_time)
+                    .unwrap_or_else(|| Utc::now());
                 Ok(to_module_with_live_readings(&m, time)?)
             })
         })
