@@ -26,6 +26,13 @@ pub enum UpgradeError {
     ServerError,
 }
 
+#[derive(Debug, Default)]
+pub struct ConfigureWifiTransmission {
+    pub enabled: bool,
+    pub token: Option<String>,
+    pub url: Option<String>,
+}
+
 impl Client {
     pub fn new() -> Result<Self> {
         let mut headers = HeaderMap::new();
@@ -49,6 +56,27 @@ impl Client {
     pub async fn query_readings(&self, addr: &str) -> Result<HttpReply> {
         let mut query = HttpQuery::default();
         query.r#type = QueryType::QueryGetReadings as i32;
+        let encoded = query.encode_length_delimited_to_vec();
+        let req = self.new_request(addr)?.body(encoded).build()?;
+        self.execute(req).await
+    }
+
+    pub async fn configure_wifi_transmission(
+        &self,
+        addr: &str,
+        configure: ConfigureWifiTransmission,
+    ) -> Result<HttpReply> {
+        let mut query = HttpQuery::default();
+        query.r#type = QueryType::QueryConfigure as i32;
+        // TODO Impl Into<Transmission> for ConfigureWifiTransmission
+        query.transmission = Some(Transmission {
+            wifi: Some(WifiTransmission {
+                modifying: true,
+                url: configure.url.unwrap_or_else(|| "".to_owned()),
+                token: configure.token.unwrap_or_else(|| "".to_owned()),
+                enabled: configure.enabled,
+            }),
+        });
         let encoded = query.encode_length_delimited_to_vec();
         let req = self.new_request(addr)?.body(encoded).build()?;
         self.execute(req).await
