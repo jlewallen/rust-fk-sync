@@ -47,6 +47,7 @@ impl Client {
 
         let client = reqwest::ClientBuilder::new()
             .user_agent("rustfk")
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(5))
             .default_headers(headers)
             .build()?;
