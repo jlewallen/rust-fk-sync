@@ -54,11 +54,11 @@ impl Client {
         Ok(Self { client })
     }
 
-    pub async fn query_status(&self, addr: &str) -> Result<HttpReply> {
+    pub async fn query_status(&self, addr: &str) -> Result<RawAndDecoded<HttpReply>> {
         self.execute(self.new_request(addr)?.build()?).await
     }
 
-    pub async fn query_readings(&self, addr: &str) -> Result<HttpReply> {
+    pub async fn query_readings(&self, addr: &str) -> Result<RawAndDecoded<HttpReply>> {
         let mut query = HttpQuery::default();
         query.r#type = QueryType::QueryGetReadings as i32;
         query.time = unix_time().unwrap_or(0);
@@ -71,7 +71,7 @@ impl Client {
         &self,
         addr: &str,
         configure: ConfigureWifiTransmission,
-    ) -> Result<HttpReply> {
+    ) -> Result<RawAndDecoded<HttpReply>> {
         let mut query = HttpQuery::default();
         query.r#type = QueryType::QueryConfigure as i32;
         // TODO Impl Into<Transmission> for ConfigureWifiTransmission
@@ -88,7 +88,11 @@ impl Client {
         self.execute(req).await
     }
 
-    pub async fn clear_calibration(&self, addr: &str, module: usize) -> Result<ModuleHttpReply> {
+    pub async fn clear_calibration(
+        &self,
+        addr: &str,
+        module: usize,
+    ) -> Result<RawAndDecoded<HttpReply>> {
         let mut query = ModuleHttpQuery::default();
         query.r#type = ModuleQueryType::ModuleQueryReset as i32;
         let encoded = query.encode_length_delimited_to_vec();
@@ -104,7 +108,7 @@ impl Client {
         addr: &str,
         module: usize,
         data: &[u8],
-    ) -> Result<ModuleHttpReply> {
+    ) -> Result<RawAndDecoded<ModuleHttpReply>> {
         let mut query = ModuleHttpQuery::default();
         query.r#type = ModuleQueryType::ModuleQueryConfigure as i32;
         query.configuration = data.to_vec();
@@ -185,7 +189,10 @@ impl Client {
         Ok(tokio_stream::wrappers::UnboundedReceiverStream::new(recv))
     }
 
-    async fn execute<T: Message + Default>(&self, req: reqwest::Request) -> Result<T> {
+    async fn execute<T: Message + Default>(
+        &self,
+        req: reqwest::Request,
+    ) -> Result<RawAndDecoded<T>> {
         let url = req.url().clone();
 
         debug!("{} querying", &url);
@@ -193,7 +200,11 @@ impl Client {
         let bytes = response.bytes().await?;
 
         debug!("{} queried, got {} bytes", &url, bytes.len());
-        Ok(T::decode_length_delimited(bytes)?)
+        let decoded = T::decode_length_delimited(bytes.clone())?;
+        Ok(RawAndDecoded {
+            bytes: bytes.to_vec(),
+            decoded,
+        })
     }
 
     fn new_module_request(&self, addr: &str, module: usize) -> Result<RequestBuilder> {
@@ -205,6 +216,11 @@ impl Client {
         let url = format!("http://{}/fk/v1", addr);
         Ok(self.client.post(&url).timeout(Duration::from_secs(5)))
     }
+}
+
+pub struct RawAndDecoded<T> {
+    pub bytes: Vec<u8>,
+    pub decoded: T,
 }
 
 pub fn parse_http_reply(data: &[u8]) -> Result<HttpReply> {

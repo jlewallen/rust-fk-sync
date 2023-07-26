@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
                 .await
                 .context("Querying 192.168.0.205")?;
 
-            info!("{:?}", status);
+            info!("{:?}", status.decoded);
 
             Ok(())
         }
