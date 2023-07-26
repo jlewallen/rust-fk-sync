@@ -209,6 +209,20 @@ where
         })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddStation {
+    pub name: String,
+    pub device_id: String,
+    pub location_name: String,
+    pub status_pb: String,
+}
+
+#[derive(Deserialize)]
+pub struct Station {
+    pub id: u32,
+}
+
 #[derive(Debug)]
 pub struct AuthenticatedClient {
     tokens: Tokens,
@@ -234,6 +248,12 @@ impl AuthenticatedClient {
 
     pub async fn issue_transmission_token(&self) -> Result<TransmissionToken, PortalError> {
         let req = self.plain.build_get("/user/transmission-token").await?;
+        let response = self.plain.execute_req(req).await?;
+        Ok(response.json().await?)
+    }
+
+    pub async fn add_or_update_station(&self, station: AddStation) -> Result<Station> {
+        let req = self.plain.build_post("/stations", station).await?;
         let response = self.plain.execute_req(req).await?;
         Ok(response.json().await?)
     }
