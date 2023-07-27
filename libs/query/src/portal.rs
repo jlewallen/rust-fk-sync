@@ -249,10 +249,24 @@ impl AuthenticatedClient {
         Ok(response.json().await?)
     }
 
-    pub async fn add_or_update_station(&self, station: AddStation) -> Result<Station> {
+    pub async fn add_or_update_station(
+        &self,
+        station: AddStation,
+    ) -> Result<Option<Station>, PortalError> {
         let req = self.plain.build_post("/stations", station).await?;
-        let response = self.plain.execute_req(req).await?;
-        Ok(response.json().await?)
+        match self.plain.execute_req(req).await {
+            Ok(response) => Ok(Some(response.json().await?)),
+            Err(e) => match e {
+                PortalError::HttpStatus(status) => {
+                    if status.as_u16() == 400 {
+                        Ok(None)
+                    } else {
+                        Err(e)
+                    }
+                }
+                _ => Err(e),
+            },
+        }
     }
 
     pub async fn upload_readings(
