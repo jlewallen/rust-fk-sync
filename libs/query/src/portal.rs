@@ -174,6 +174,7 @@ struct Firmwares {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Firmware {
     pub id: i64,
     #[serde(deserialize_with = "deserialize_firmware_time")]
@@ -183,13 +184,8 @@ pub struct Firmware {
     pub profile: String,
     pub version: String,
     pub url: String,
-    #[serde(rename = "buildNumber")]
     pub build_number: i64,
-    #[serde(
-        rename = "buildTime",
-        deserialize_with = "from_ts",
-        serialize_with = "to_ts"
-    )]
+    #[serde(deserialize_with = "from_ts", serialize_with = "to_ts")]
     pub build_time: DateTime<Utc>,
     pub meta: HashMap<String, String>,
 }
