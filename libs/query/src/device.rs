@@ -7,7 +7,6 @@ use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 use std::{io::Cursor, time::SystemTime};
 use thiserror::Error;
-use tokio::fs::File;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::io::ReaderStream;
 use tracing::*;
@@ -127,7 +126,7 @@ impl Client {
         path: &Path,
         swap: bool,
     ) -> Result<impl Stream<Item = Result<BytesUploaded, UpgradeError>>> {
-        let file = File::open(path).await?;
+        let file = tokio::fs::File::open(path).await?;
         let md = file.metadata().await?;
         let total_bytes = md.len();
 
