@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::model::*;
 use query::device::HttpReply;
@@ -60,6 +62,12 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
         warn!("http reply missing status time");
     }
 
+    let module_configurations = reply
+        .modules
+        .iter()
+        .map(|module| (module.id.clone(), module.configuration.clone()))
+        .collect::<HashMap<_, _>>();
+
     let modules = reply
         .live_readings
         .iter()
@@ -68,7 +76,13 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
                 let time = time_from_u64_seconds(r.time)
                     .or(status_time)
                     .unwrap_or_else(|| Utc::now());
-                Ok(to_module_with_live_readings(&m, time)?)
+                Ok(to_module_with_live_readings(
+                    &m,
+                    module_configurations
+                        .get(&m.module.as_ref().ok_or(ReplyMappingError::NoModule)?.id)
+                        .cloned(),
+                    time,
+                )?)
             })
         })
         .collect::<Result<Vec<_>, ReplyMappingError>>()?;
@@ -105,6 +119,7 @@ pub fn http_reply_to_station(reply: HttpReply) -> Result<Station, ReplyMappingEr
 
 fn to_module_with_live_readings(
     m: &query::device::LiveModuleReadings,
+    configuration: Option<Vec<u8>>,
     time: DateTime<Utc>,
 ) -> Result<Module, ReplyMappingError> {
     let sensors = m
@@ -115,12 +130,14 @@ fn to_module_with_live_readings(
 
     to_module(
         m.module.as_ref().ok_or(ReplyMappingError::NoModule)?,
+        configuration,
         sensors,
     )
 }
 
 fn to_module(
     mc: &query::device::ModuleCapabilities,
+    configuration: Option<Vec<u8>>,
     sensors: Vec<Sensor>,
 ) -> Result<Module, ReplyMappingError> {
     let header = mc
@@ -131,7 +148,7 @@ fn to_module(
     let configuration = if mc.configuration.len() > 0 {
         Some(mc.configuration.clone())
     } else {
-        None
+        configuration
     };
 
     Ok(Module {
