@@ -76,7 +76,7 @@ pub enum ServerEvent {
 
 #[derive(Debug)]
 pub enum ServerCommand {
-    Begin(Discovered),
+    Begin(Discovered, Option<u64>),
     Cancel(DeviceId),
     Received(TransportMessage),
     Tick,
@@ -131,6 +131,7 @@ struct ConnectedDevice {
     syncing_started: Option<SystemTime>,
     progress_published: Option<Instant>,
     received_at: Option<Instant>,
+    first: Option<u64>,
     total_records: Option<u64>,
     received: RangeSetBlaze<u64>,
     backoff: ExponentialBackoff,
@@ -160,6 +161,7 @@ impl ConnectedDevice {
             state: DeviceState::Discovered,
             identity: None,
             received_at: None,
+            first: None,
             total_records: None,
             received: RangeSetBlaze::new(),
             backoff: Self::stall_backoff(),
@@ -174,11 +176,12 @@ impl ConnectedDevice {
         Self::new_with_batch_size(device_id, addr, 5000)
     }
 
-    fn try_begin(&mut self) -> Transition {
+    fn try_begin(&mut self, first: Option<u64>) -> Transition {
         match &self.state {
             DeviceState::Discovered | DeviceState::Synced => {
+                self.first = first;
                 self.total_records = None;
-                self.received = Default::default();
+                self.received.clear();
                 self.received_at = None;
                 self.sync_id = new_sync_id();
                 self.syncing_started = None;
@@ -245,6 +248,9 @@ impl ConnectedDevice {
                 self.identity = Some(identity.clone());
                 self.total_records = Some(*nrecords);
                 self.syncing_started = Some(SystemTime::now());
+                if let Some(first) = self.first {
+                    self.received(RangeSetBlaze::from_iter([0..=first]));
+                }
                 self.query_requires()
             }
             Message::Records {
@@ -525,8 +531,8 @@ impl<T: Transport, R: RecordsSink + 'static> Server<T, R> {
             .await
     }
 
-    pub async fn sync(&self, discovered: Discovered) -> Result<()> {
-        self.send(ServerCommand::Begin(discovered)).await
+    pub async fn sync(&self, discovered: Discovered, first: Option<u64>) -> Result<()> {
+        self.send(ServerCommand::Begin(discovered, first)).await
     }
 
     pub async fn cancel(&self, device_id: DeviceId) -> Result<()> {
@@ -744,14 +750,14 @@ async fn handle_server_command<R: RecordsSink, S: SendTransport>(
     devices: &mut Devices,
 ) -> Result<()> {
     match cmd {
-        ServerCommand::Begin(discovered) => {
+        ServerCommand::Begin(discovered, first) => {
             let udp_addr = discovered
                 .udp_addr
                 .ok_or(anyhow::anyhow!("Udp address is required"))?;
 
             match devices.get_or_add_device(discovered.device_id.clone(), udp_addr) {
                 Some(connected) => {
-                    let transition = connected.try_begin();
+                    let transition = connected.try_begin(first.clone());
                     connected.apply(transition, events, sink, sending).await?
                 }
                 None => warn!("No connected device on Begin"),

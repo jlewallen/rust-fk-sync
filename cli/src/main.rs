@@ -145,7 +145,7 @@ async fn main() -> Result<()> {
                         if let Some(http_addr) = d.http_addr {
                             if http_addr.port() == 80 || http_addr.port() == 0 {
                                 info!("{:?}", d);
-                                server.sync(d).await.expect("Error initiating sync");
+                                server.sync(d, None).await.expect("Error initiating sync");
                             } else {
                                 debug!("{:?} (ignored)", d);
                             }
@@ -162,19 +162,22 @@ async fn main() -> Result<()> {
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
                             server
-                                .sync(Discovered {
-                                    device_id: DeviceId(device_id),
-                                    http_addr: Some(
-                                        format!("{}:80", ip)
-                                            .parse()
-                                            .expect("Parsing http_addr failed"),
-                                    ),
-                                    udp_addr: Some(
-                                        format!("{}:22144", ip)
-                                            .parse()
-                                            .expect("Parsing udp_addr failed"),
-                                    ),
-                                })
+                                .sync(
+                                    Discovered {
+                                        device_id: DeviceId(device_id),
+                                        http_addr: Some(
+                                            format!("{}:80", ip)
+                                                .parse()
+                                                .expect("Parsing http_addr failed"),
+                                        ),
+                                        udp_addr: Some(
+                                            format!("{}:22144", ip)
+                                                .parse()
+                                                .expect("Parsing udp_addr failed"),
+                                        ),
+                                    },
+                                    None,
+                                )
                                 .await
                                 .expect("error initiating sync");
                         }

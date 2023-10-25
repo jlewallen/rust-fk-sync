@@ -97,9 +97,7 @@ impl FilesRecordSink {
         sync_id: &String,
         identity: &Identity,
         files: Vec<RecordsFile>,
-    ) -> Result<i64> {
-        assert_eq!(files.get(0).map(|f| f.head), Some(0));
-
+    ) -> Result<(i64, i64)> {
         let device_path = self.device_path(&identity.device_id);
         let path = device_path.join(format!("{}.fkpb", sync_id));
 
@@ -110,12 +108,20 @@ impl FilesRecordSink {
             .open(&path)
             .with_context(|| format!("Creating {:?}", &path))?;
 
+        let mut head = files.iter().next().map(|f| f.head).unwrap();
         let mut written = 0;
 
         for file in files.iter() {
-            let mut skipping = written - file.head;
-            debug!("{:?} Records={:?} Skipped={:?}", file, written, skipping);
-            assert!(skipping >= 0);
+            let mut skipping = written - file.head + head;
+            if skipping < 0 {
+                warn!(
+                    "{:?} - {:?} + {:?} = {:?}",
+                    written, file.head, head, skipping
+                );
+                assert!(skipping >= 0);
+            }
+
+            head = [file.head, head].into_iter().min().unwrap_or(0);
 
             let mut reader = Reader::from_file(&file.path)?;
             while let Some(record) = reader.read(|r, b| {
@@ -134,17 +140,23 @@ impl FilesRecordSink {
                     skipping -= 1;
                 }
             }
+
+            debug!(
+                "{:?} Head={:?} Records={:?} Skipped={:?}",
+                file, head, written, skipping
+            );
         }
 
         info!("{} Flushed {} records", path.display(), written);
 
-        Ok(written)
+        Ok((head, written))
     }
 
     fn write_file_meta(
         &self,
         sync_id: &String,
         identity: &Identity,
+        head_record: i64,
         total_records: i64,
     ) -> Result<()> {
         let device_path = self.device_path(&identity.device_id);
@@ -170,8 +182,8 @@ impl FilesRecordSink {
         let fm = FileMeta {
             sync_id: sync_id.clone(),
             device_id: identity.device_id.clone().into(),
-            head: 0,
-            tail: total_records - 1,
+            head: head_record,
+            tail: head_record + total_records - 1,
             data_name,
             headers,
         };
@@ -282,9 +294,9 @@ impl RecordsSink for FilesRecordSink {
             .sorted_unstable_by_key(|r| r.head)
             .collect();
 
-        let total_records = self.join_files(&sync_id, &identity, files)?;
+        let (head_record, total_records) = self.join_files(&sync_id, &identity, files)?;
 
-        self.write_file_meta(&sync_id, &identity, total_records)?;
+        self.write_file_meta(&sync_id, &identity, head_record, total_records)?;
 
         Ok(())
     }

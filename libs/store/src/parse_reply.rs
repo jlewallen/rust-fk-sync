@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::*;
 
 use crate::model::*;
 use query::device::HttpReply;
