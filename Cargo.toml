@@ -5,6 +5,7 @@ members = [
     "libs/discovery",
     "libs/store",
     "libs/sync",
-    "cli"
+    "cli",
 ]
-default-members = [ "cli" ]
+default-members = ["cli"]
+resolver = "2"
